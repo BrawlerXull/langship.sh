@@ -1,0 +1,18 @@
+services:
+  restate:
+    image: docker.io/restatedev/restate:latest
+    ports:
+      - "8081:8080"   # ingress
+      - "9070:9070"   # admin
+
+  flow:
+    build: .
+    ports:
+      - "8080:8080"   # UI + API
+      - "9080:9080"   # restate callback
+    environment:
+      - RESTATE_INGRESS_URL=http://restate:8080
+      - RESTATE_ADMIN_URL=http://restate:9070
+      - RESTATE_DEPLOYMENT_URI=http://flow:9080
+    depends_on:
+      - restate

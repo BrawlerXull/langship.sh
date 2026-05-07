@@ -1,0 +1,12 @@
+node_modules
+.next
+dist
+# Note: out/ is the static-export target embedded by Go (web/embed.go).
+# We ignore everything inside but keep the directory + .gitkeep so the
+# Go embed compiles before the npm build has run.
+/out/*
+!/out/.gitkeep
+.env*.local
+.DS_Store
+next-env.d.ts
+*.tsbuildinfo

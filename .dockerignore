@@ -1,0 +1,33 @@
+.git
+.gitignore
+.dockerignore
+.DS_Store
+.idea
+.vscode
+
+# Local Go binaries
+bin/
+flow
+*.test
+coverage.out
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend build artifacts (rebuilt inside the web build stage)
+web/node_modules/
+web/.next/
+web/out/
+web/dist/
+
+# Secrets / env
+.env
+.env.local
+.env.*.local
+
+# Docs / examples don't need to be in build context
+docs/
+README.md
+LICENSE
