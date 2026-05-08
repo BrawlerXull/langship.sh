@@ -1,0 +1,29 @@
+# BuildKit daemon config — used by the buildkitd compose service.
+# https://github.com/moby/buildkit/blob/master/docs/buildkitd.toml.md
+
+debug = false
+
+# Insecure registries for local development. Add your private registry here
+# if it serves plain HTTP. ghcr.io / docker.io / etc. work without an entry.
+[registry."localhost:5000"]
+  http = true
+  insecure = true
+
+[registry."registry:5000"]
+  http = true
+  insecure = true
+
+# Disable the worker's outbound OTEL push by default. Re-enable with the
+# OTEL_EXPORTER_OTLP_ENDPOINT env var on the buildkitd container if you want
+# tracing.
+[grpc]
+  address = ["tcp://0.0.0.0:1234", "unix:///run/buildkit/buildkitd.sock"]
+
+[worker.oci]
+  enabled = true
+  # Garbage-collect intermediate layers when the cache exceeds 20 GiB.
+  gc = true
+  gckeepstorage = 20000
+
+[worker.containerd]
+  enabled = false

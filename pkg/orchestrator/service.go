@@ -51,12 +51,13 @@ type WorkflowService struct {
 	lookup          engine.ExecutorLookup
 	approvalCreator durability.ApprovalCreator
 	execStore       ExecutionCompleter
+	emitter         engine.Emitter
 }
 
-// NewWorkflowService constructs the Restate-side handler. approvalCreator and
-// execStore are optional — pass nil if not yet wired.
-func NewWorkflowService(lookup engine.ExecutorLookup, approvalCreator durability.ApprovalCreator, execStore ExecutionCompleter) *WorkflowService {
-	return &WorkflowService{lookup: lookup, approvalCreator: approvalCreator, execStore: execStore}
+// NewWorkflowService constructs the Restate-side handler. approvalCreator,
+// execStore, and emitter are optional — pass nil if not yet wired.
+func NewWorkflowService(lookup engine.ExecutorLookup, approvalCreator durability.ApprovalCreator, execStore ExecutionCompleter, emitter engine.Emitter) *WorkflowService {
+	return &WorkflowService{lookup: lookup, approvalCreator: approvalCreator, execStore: execStore, emitter: emitter}
 }
 
 // ServiceName is required by the Restate SDK. It's the service identifier
@@ -74,6 +75,9 @@ func (w *WorkflowService) Run(ctx restate.WorkflowContext, req WorkflowRequest) 
 	enrichedCtx = durability.WithAPIKey(enrichedCtx, req.APIKey)
 	if w.approvalCreator != nil {
 		enrichedCtx = durability.WithApprovalCreator(enrichedCtx, w.approvalCreator)
+	}
+	if w.emitter != nil {
+		enrichedCtx = engine.WithEmitter(enrichedCtx, w.emitter)
 	}
 
 	result, err := walkDurable(enrichedCtx, req.Workflow, req.TriggerData, w.lookup, restateNodeRunner(ctx))
@@ -158,8 +162,8 @@ var defaultRetryPolicy = restate.WithInvocationRetryPolicy(
 // NewRestateServer constructs a Restate server endpoint with the WorkflowExecutor
 // handler bound. extraServices lets callers register additional Restate handlers
 // (for governance, audit, etc.) without modifying this package.
-func NewRestateServer(lookup engine.ExecutorLookup, approvalCreator durability.ApprovalCreator, execStore ExecutionCompleter, extraServices ...any) *server.Restate {
-	wfSvc := NewWorkflowService(lookup, approvalCreator, execStore)
+func NewRestateServer(lookup engine.ExecutorLookup, approvalCreator durability.ApprovalCreator, execStore ExecutionCompleter, emitter engine.Emitter, extraServices ...any) *server.Restate {
+	wfSvc := NewWorkflowService(lookup, approvalCreator, execStore, emitter)
 
 	rs := server.NewRestate().
 		Bind(restate.Reflect(wfSvc, defaultRetryPolicy))

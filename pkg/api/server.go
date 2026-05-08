@@ -52,6 +52,17 @@ type ServerDeps struct {
 	Pipelines storage.PipelineStore
 	Runs      storage.RunStore
 	Agents    storage.AgentStore
+	// Events is the in-memory pub/sub bus the orchestrator publishes
+	// per-node lifecycle events to. The SSE handler subscribes per
+	// execution ID. Nil disables /api/executions/{id}/stream.
+	Events EventSubscriber
+}
+
+// EventSubscriber is the slice of execevents.MemoryBus the API needs.
+// Defined here as a tiny interface so we don't pull pkg/execevents into
+// the api package's import graph.
+type EventSubscriber interface {
+	Subscribe(execID string) (<-chan engine.ExecutionEvent, func())
 }
 
 // Server is a thin JSON API server. It does not serve a frontend.
@@ -65,6 +76,7 @@ type Server struct {
 	pipelines storage.PipelineStore
 	runs      storage.RunStore
 	agents    storage.AgentStore
+	events    EventSubscriber
 }
 
 // NewServer constructs an API-only Server. deps.Orchestrator may be nil —
@@ -80,6 +92,7 @@ func NewServer(deps ServerDeps) *Server {
 		pipelines:     deps.Pipelines,
 		runs:          deps.Runs,
 		agents:        deps.Agents,
+		events:        deps.Events,
 	}
 	s.routes()
 	return s
@@ -107,6 +120,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/workflows/execute", s.handleExecuteWorkflow)
 	s.mux.HandleFunc("GET /api/executions", s.handleListExecutions)
 	s.mux.HandleFunc("GET /api/executions/{id}", s.handleGetExecution)
+	s.mux.HandleFunc("GET /api/executions/{id}/stream", s.handleStreamExecution)
 	s.mux.HandleFunc("POST /api/executions/{id}/resume", s.handleResumeExecution)
 
 	// Agents — Langship-style agent registry (git URL + PAT)
@@ -462,6 +476,73 @@ func (s *Server) handleGetExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// handleStreamExecution streams ExecutionEvent JSON over text/event-stream.
+// Subscribes to the in-memory bus for the given execution ID. Closes the
+// connection after a terminal event ("done") or when the client disconnects.
+//
+// Each event is emitted as a single SSE message:
+//
+//	data: {"type":"node_started","node":"Build","status":"running"}\n\n
+//
+// Heartbeats every 15s keep proxies (nginx, Cloudflare) from idling out.
+func (s *Server) handleStreamExecution(w http.ResponseWriter, r *http.Request) {
+	if s.events == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("event stream not configured"))
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, errors.New("execution id required"))
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
+	w.WriteHeader(http.StatusOK)
+
+	ch, cancel := s.events.Subscribe(id)
+	defer cancel()
+
+	// Tell the client which execution it's subscribed to (also primes the
+	// SSE pipe so flushers in the middle don't withhold the first byte).
+	_, _ = fmt.Fprintf(w, "event: open\ndata: {\"execution_id\":%q}\n\n", id)
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			// SSE comments are heartbeats; clients ignore them.
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+			if ev.Type == engine.EventDone {
+				return
+			}
+		}
+	}
 }
 
 // handleListExecutions returns recent runs from storage. Optional

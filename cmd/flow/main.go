@@ -15,6 +15,7 @@ import (
 
 	"github.com/lyzrai/flow/pkg/api"
 	"github.com/lyzrai/flow/pkg/engine"
+	"github.com/lyzrai/flow/pkg/execevents"
 	"github.com/lyzrai/flow/pkg/executors"
 	"github.com/lyzrai/flow/pkg/orchestrator"
 	"github.com/lyzrai/flow/pkg/storage"
@@ -60,7 +61,8 @@ env vars (for `+"`flow serve`"+`):
   RESTATE_INGRESS_URL        Restate ingress URL (default http://localhost:8081)
   RESTATE_ADMIN_URL          Restate admin URL (default http://localhost:9070)
   RESTATE_SERVICE_ADDR       Restate service-endpoint listen addr (default :9080)
-  RESTATE_DEPLOYMENT_URI     How Restate reaches this service (default http://localhost:9080)`)
+  RESTATE_DEPLOYMENT_URI     How Restate reaches this service (default http://host.docker.internal:9080)
+  BUILDKIT_HOST              BuildKit gRPC address (default tcp://127.0.0.1:1234)`)
 }
 
 func runWorkflow(path string) int {
@@ -95,14 +97,20 @@ func runWorkflow(path string) int {
 }
 
 func serve() int {
-	executors.RegisterAll()
-	lookup := executors.BuildLookup()
+	// We register executors after Mongo is up so the Build executor can
+	// look up agents from storage. See below.
+	var lookup engine.ExecutorLookup
 
 	addr := envOr("FLOW_ADDR", ":8090")
 	ingressURL := envOr("RESTATE_INGRESS_URL", "http://localhost:8081")
 	adminURL := envOr("RESTATE_ADMIN_URL", "http://localhost:9070")
 	serviceAddr := envOr("RESTATE_SERVICE_ADDR", ":9080")
-	deployURI := envOr("RESTATE_DEPLOYMENT_URI", "http://localhost"+serviceAddr)
+	// Default to host.docker.internal so Restate-in-Docker can reach the
+	// flow service when `make watch` runs on the host (macOS/Windows). On
+	// Linux without docker-desktop's host-gateway alias you'll need to set
+	// RESTATE_DEPLOYMENT_URI yourself. In docker-compose, the flow service
+	// overrides this via env to `http://flow:9080`.
+	deployURI := envOr("RESTATE_DEPLOYMENT_URI", "http://host.docker.internal"+serviceAddr)
 	mongoURI := envOr("MONGO_URI", "")
 	mongoDB := envOr("MONGO_DB", "flow")
 
@@ -124,6 +132,13 @@ func serve() int {
 	}()
 	slog.Info("mongo connected", slog.String("db", mongoDB))
 
+	// Register executors now that storage is ready; the Build executor
+	// reads from AgentStore.
+	executors.RegisterAll(executors.RegistryDeps{
+		Agents: mongo.Agents(),
+	})
+	lookup = executors.BuildLookup()
+
 	slog.Info("checking restate",
 		slog.String("ingress", ingressURL),
 		slog.String("admin", adminURL),
@@ -138,8 +153,13 @@ func serve() int {
 
 	orch := orchestrator.NewRestateOrchestrator(ingressURL)
 
+	// In-memory event bus shared between the orchestrator (publisher) and
+	// the API server (SSE subscribers). One bus per process is fine for
+	// the self-hosted single-process topology.
+	eventBus := execevents.NewMemoryBus()
+
 	// Start the Restate service endpoint that Restate calls back into.
-	go startRestateService(serviceAddr, lookup)
+	go startRestateService(serviceAddr, lookup, mongo.Runs(), eventBus)
 
 	// Auto-register with Restate admin so callbacks land on us.
 	go func() {
@@ -168,6 +188,7 @@ func serve() int {
 			Pipelines:         mongo.Pipelines(),
 			Runs:              mongo.Runs(),
 			Agents:            mongo.Agents(),
+			Events:            eventBus,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -194,8 +215,8 @@ func serve() int {
 	return 0
 }
 
-func startRestateService(addr string, lookup engine.ExecutorLookup) {
-	rs := orchestrator.NewRestateServer(lookup, nil, nil)
+func startRestateService(addr string, lookup engine.ExecutorLookup, runs orchestrator.ExecutionCompleter, emitter engine.Emitter) {
+	rs := orchestrator.NewRestateServer(lookup, nil, runs, emitter)
 	slog.Info("starting restate service endpoint", slog.String("addr", addr))
 	if err := rs.Start(context.Background(), addr); err != nil {
 		slog.Error("restate service failed", slog.Any("error", err))

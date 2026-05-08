@@ -1,8 +1,42 @@
 package engine
 
 import (
+	"context"
+
 	"github.com/lyzrai/flow/pkg/models"
 )
+
+// NodeLogger is the per-node log sink an executor can use to stream output
+// lines to the run UI. The runner installs one before calling Execute and
+// removes it after. Implementations publish each call as an EventNodeLog
+// event on the shared bus.
+type NodeLogger interface {
+	Log(line string)
+}
+
+// nodeLoggerKey is the context value key for an active NodeLogger.
+type nodeLoggerKey struct{}
+
+// WithNodeLogger attaches l to ctx. Executors call NodeLoggerFromContext to
+// retrieve it. Returns the original context unchanged if l is nil.
+func WithNodeLogger(ctx context.Context, l NodeLogger) context.Context {
+	if l == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, nodeLoggerKey{}, l)
+}
+
+// NodeLoggerFromContext returns the logger stored in ctx, or a no-op.
+func NodeLoggerFromContext(ctx context.Context) NodeLogger {
+	if l, ok := ctx.Value(nodeLoggerKey{}).(NodeLogger); ok && l != nil {
+		return l
+	}
+	return noopLogger{}
+}
+
+type noopLogger struct{}
+
+func (noopLogger) Log(string) {}
 
 // ExecutionContext is the data bus that carries items between nodes during execution.
 type ExecutionContext struct {

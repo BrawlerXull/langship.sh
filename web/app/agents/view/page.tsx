@@ -106,13 +106,25 @@ function AgentDetail() {
   async function onTrigger() {
     await withBusy("trigger", async () => {
       const res = await api.triggerAgent(id);
-      if (res.executionIds?.length) {
-        router.push(
-          `/executions/view/?id=${encodeURIComponent(res.executionIds[0])}`
-        );
-      } else {
-        await load();
+      const ids = res.executionIds ?? [];
+      if (ids.length === 1) {
+        router.push(`/executions/view/?id=${encodeURIComponent(ids[0])}`);
+        return;
       }
+      if (ids.length > 1) {
+        router.push(`/executions/multi/?ids=${ids.map(encodeURIComponent).join(",")}`);
+        return;
+      }
+      // Nothing dispatched — surface failures so the user sees why.
+      const fails = res.failures ?? [];
+      if (fails.length === 0) {
+        throw new Error("trigger returned no executions and no failure detail");
+      }
+      throw new Error(
+        fails
+          .map((f) => `${f.pipelineId}: ${f.reason}${f.error ? " — " + f.error : ""}`)
+          .join("; ")
+      );
     });
   }
 
@@ -240,6 +252,15 @@ function AgentDetail() {
                 busy === "trigger" ||
                 !config?.orchestratorEnabled ||
                 !agent.attachedPipelines?.length
+              }
+              title={
+                !config?.orchestratorEnabled
+                  ? "Orchestrator not configured (Restate unreachable)"
+                  : !agent.attachedPipelines?.length
+                    ? "Attach a pipeline first"
+                    : busy === "trigger"
+                      ? "Dispatching…"
+                      : "Trigger a run on every attached pipeline"
               }
             >
               <Play />

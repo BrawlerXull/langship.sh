@@ -41,6 +41,12 @@ type NavItem = {
 
 const primary: NavItem[] = [
   {
+    title: "Agents",
+    href: "/agents",
+    icon: Bot,
+    match: (p) => p.startsWith("/agents"),
+  },
+  {
     title: "Pipelines",
     href: "/",
     icon: LayoutGrid,
@@ -57,12 +63,6 @@ const primary: NavItem[] = [
     href: "/executions/view",
     icon: Activity,
     match: (p) => p.startsWith("/executions"),
-  },
-  {
-    title: "Agents",
-    href: "/agents",
-    icon: Bot,
-    match: (p) => p.startsWith("/agents"),
   },
 ];
 

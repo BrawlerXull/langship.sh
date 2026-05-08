@@ -7,6 +7,7 @@ import (
 
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/models"
+	"github.com/lyzrai/flow/pkg/storage"
 )
 
 var (
@@ -34,6 +35,7 @@ func Get(nodeType string) (NodeExecutor, error) {
 // RegistryDeps holds optional dependencies for executors that need external access.
 type RegistryDeps struct {
 	WorkflowLoader WorkflowLoaderFunc
+	Agents         storage.AgentStore // used by the Build executor to look up the source repo + PAT
 }
 
 // WorkflowLoaderFunc loads a workflow definition by ID from storage.
@@ -41,13 +43,27 @@ type WorkflowLoaderFunc func(ctx context.Context, id string) (*models.WorkflowDe
 
 // RegisterAll registers the v0.1 primitive executors.
 func RegisterAll(deps ...RegistryDeps) {
-	// Control flow / data primitives
+	var d RegistryDeps
+	if len(deps) > 0 {
+		d = deps[0]
+	}
+
+	// Trigger / data primitives
 	Register("flow-nodes-base.trigger", &TriggerExecutor{})
 	Register("flow-nodes-base.noOp", &NoOpExecutor{})
 	Register("flow-nodes-base.set", &SetExecutor{})
 
 	// Human-in-the-loop
 	Register("flow-nodes-base.waitForApproval", &ApprovalExecutor{})
+
+	// CI/CD primitives — Build is real; the rest are stubs for now.
+	Register("flow-nodes-base.build", &BuildExecutor{Agents: d.Agents})
+	Register("flow-nodes-base.test", &TestExecutor{})
+	Register("flow-nodes-base.eval", &EvalExecutor{})
+	Register("flow-nodes-base.policy", &PolicyExecutor{})
+	Register("flow-nodes-base.deploy", &DeployExecutor{})
+	Register("flow-nodes-base.promote", &PromoteExecutor{})
+	Register("flow-nodes-base.rollback", &RollbackExecutor{})
 }
 
 // BuildLookup creates an ExecutorLookup from the registered executors.

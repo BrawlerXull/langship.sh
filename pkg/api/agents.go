@@ -362,20 +362,27 @@ func (s *Server) handleTriggerAgent(w http.ResponseWriter, r *http.Request) {
 		"repoUrl":   a.RepoURL,
 		"ref":       a.Ref,
 	}}
-	execIDs, err := s.dispatchAgent(r.Context(), a, triggerData)
+	execIDs, failures, err := s.dispatchAgent(r.Context(), a, triggerData)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	status := http.StatusAccepted
+	if len(execIDs) == 0 && len(failures) > 0 {
+		// Nothing dispatched — surface as 502 so the UI shows the error
+		// card instead of silently navigating nowhere.
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, map[string]any{
 		"executionIds": execIDs,
+		"failures":     failures,
 	})
 }
 
 // dispatchAgent runs each attached pipeline asynchronously. Returns the
-// execution IDs collected. Failures on individual pipelines are logged
-// but don't abort the rest.
-func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger any) ([]string, error) {
+// execution IDs collected and a per-pipeline failure list so the caller
+// can surface skip reasons to the user instead of silently returning [].
+func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger any) ([]string, []DispatchFailure, error) {
 	triggerJSON, _ := json.Marshal(trigger)
 	var triggerItems []models.Item
 	if items, ok := trigger.([]map[string]any); ok {
@@ -385,13 +392,18 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 	}
 
 	out := make([]string, 0, len(a.AttachedPipelines))
+	var failures []DispatchFailure
 	for _, pid := range a.AttachedPipelines {
 		p, err := s.pipelines.Get(ctx, pid)
 		if err != nil {
 			slog.WarnContext(ctx, "agent_dispatch_pipeline_missing",
 				slog.String("agent_id", a.ID),
 				slog.String("pipeline_id", pid),
+				slog.Any("error", err),
 			)
+			failures = append(failures, DispatchFailure{
+				PipelineID: pid, Reason: "pipeline not found", Error: err.Error(),
+			})
 			continue
 		}
 		wf, err := engine.ParseWorkflow(p.Definition)
@@ -400,6 +412,9 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 				slog.String("pipeline_id", pid),
 				slog.Any("error", err),
 			)
+			failures = append(failures, DispatchFailure{
+				PipelineID: pid, Reason: "parse failed", Error: err.Error(),
+			})
 			continue
 		}
 		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -414,6 +429,9 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 				slog.String("pipeline_id", pid),
 				slog.Any("error", err),
 			)
+			failures = append(failures, DispatchFailure{
+				PipelineID: pid, Reason: "orchestrator submit", Error: err.Error(),
+			})
 			continue
 		}
 		if s.runs != nil {
@@ -428,7 +446,16 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 		}
 		out = append(out, execID)
 	}
-	return out, nil
+	return out, failures, nil
+}
+
+// DispatchFailure describes why a single attached pipeline was skipped at
+// dispatch time. We surface these to the API caller so trigger failures
+// don't appear as silent no-ops.
+type DispatchFailure struct {
+	PipelineID string `json:"pipelineId"`
+	Reason     string `json:"reason"`
+	Error      string `json:"error,omitempty"`
 }
 
 // --- webhook receiver ----------------------------------------------------
@@ -499,13 +526,14 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		"commit":    push.After,
 		"pusher":    push.Pusher.Name,
 	}}
-	execIDs, err := s.dispatchAgent(r.Context(), a, trigger)
+	execIDs, failures, err := s.dispatchAgent(r.Context(), a, trigger)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"executionIds": execIDs,
+		"failures":     failures,
 	})
 }
 

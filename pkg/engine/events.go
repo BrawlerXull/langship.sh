@@ -7,6 +7,7 @@ const (
 	EventNodeStarted   EventType = "node_started"
 	EventNodeCompleted EventType = "node_completed"
 	EventNodeError     EventType = "node_error"
+	EventNodeLog       EventType = "node_log" // streamed log line from an executor
 	EventToken         EventType = "token"
 	EventToolCallDelta EventType = "tool_call_delta"
 	EventBusFull       EventType = "bus_full"

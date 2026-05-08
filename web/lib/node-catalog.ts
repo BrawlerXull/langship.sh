@@ -58,11 +58,19 @@ export const CATALOG: CatalogEntry[] = [
   {
     type: "flow-nodes-base.build",
     label: "Build",
-    description: "Clone the agent repo and run a build command (e.g. docker build).",
+    description: "Clone the agent repo and build an OCI image via BuildKit (or run a shell command).",
     icon: Hammer,
     color: "bg-amber-500",
     outputs: 1,
     defaults: {
+      mode: "docker",
+      dockerfile: "Dockerfile",
+      context: ".",
+      imageName: "",
+      registry: "registry:5000",
+      platform: "linux/amd64",
+      buildArgs: "",
+      // shell-mode fallback fields:
       command: "docker build -t $AGENT_NAME:$COMMIT_SHA .",
       workdir: ".",
       timeoutSeconds: 600,

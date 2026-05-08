@@ -122,6 +122,14 @@ function TriggerForm({ node, onChange }: NodeFormProps) {
 }
 
 function BuildForm({ node, onChange }: NodeFormProps) {
+  const mode = getString(node, "mode", "docker");
+  const dockerfile = getString(node, "dockerfile", "Dockerfile");
+  const ctx = getString(node, "context", ".");
+  const imageName = getString(node, "imageName", "");
+  const registry = getString(node, "registry", "registry:5000");
+  const platform = getString(node, "platform", "linux/amd64");
+  const buildArgs = getString(node, "buildArgs", "");
+
   const command = getString(
     node,
     "command",
@@ -129,48 +137,164 @@ function BuildForm({ node, onChange }: NodeFormProps) {
   );
   const workdir = getString(node, "workdir", ".");
   const timeout = getNumber(node, "timeoutSeconds", 600);
+
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
-        <Label htmlFor="command">Command</Label>
-        <Textarea
-          id="command"
-          rows={3}
-          value={command}
-          onChange={(e) => onChange(setParam(node, "command", e.target.value))}
-          spellCheck={false}
-          className="font-mono text-xs"
-        />
+        <Label>Mode</Label>
+        <select
+          value={mode}
+          onChange={(e) => onChange(setParam(node, "mode", e.target.value))}
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="docker">docker</option>
+          <option value="shell">shell</option>
+        </select>
         <p className="text-[11px] text-muted-foreground">
-          Runs in a clone of the agent repo. Available env:{" "}
-          <code>$AGENT_NAME</code>, <code>$REPO_URL</code>,{" "}
-          <code>$COMMIT_SHA</code>, <code>$REF</code>.
+          <code>docker</code> = real OCI image build &amp; push via BuildKit.{" "}
+          <code>shell</code> = run any command (escape hatch).
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="workdir">Workdir</Label>
-          <Input
-            id="workdir"
-            value={workdir}
-            onChange={(e) => onChange(setParam(node, "workdir", e.target.value))}
-            placeholder="."
-            className="font-mono text-xs"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="timeout">Timeout (s)</Label>
-          <Input
-            id="timeout"
-            type="number"
-            min={10}
-            max={3600}
-            value={timeout}
-            onChange={(e) =>
-              onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
-            }
-          />
-        </div>
+
+      {mode === "docker" ? (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="dockerfile">Dockerfile</Label>
+            <Input
+              id="dockerfile"
+              value={dockerfile}
+              onChange={(e) =>
+                onChange(setParam(node, "dockerfile", e.target.value))
+              }
+              placeholder="Dockerfile"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Path relative to the repo root.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-ctx">Build context</Label>
+            <Input
+              id="b-ctx"
+              value={ctx}
+              onChange={(e) => onChange(setParam(node, "context", e.target.value))}
+              placeholder="."
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-image">Image name (optional)</Label>
+            <Input
+              id="b-image"
+              value={imageName}
+              onChange={(e) =>
+                onChange(setParam(node, "imageName", e.target.value))
+              }
+              placeholder="my-org/my-agent"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Defaults to <code>&lt;owner&gt;/&lt;repo&gt;</code> from the
+              agent&rsquo;s connection.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-reg">Registry</Label>
+            <Input
+              id="b-reg"
+              value={registry}
+              onChange={(e) =>
+                onChange(setParam(node, "registry", e.target.value))
+              }
+              placeholder="ghcr.io"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              In docker-compose, <code>registry:5000</code> is the bundled
+              local registry (host port 5050 for <code>docker pull</code>).
+              For <code>ghcr.io</code>, the agent&rsquo;s PAT must have{" "}
+              <code>write:packages</code>.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-plat">Target platform</Label>
+            <Input
+              id="b-plat"
+              value={platform}
+              onChange={(e) =>
+                onChange(setParam(node, "platform", e.target.value))
+              }
+              placeholder="linux/amd64"
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-args">Build args (optional)</Label>
+            <Input
+              id="b-args"
+              value={buildArgs}
+              onChange={(e) =>
+                onChange(setParam(node, "buildArgs", e.target.value))
+              }
+              placeholder="NODE_ENV=production, FOO=bar"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              <code>key=value</code>, comma-separated.
+            </p>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="command">Command</Label>
+            <Textarea
+              id="command"
+              rows={3}
+              value={command}
+              onChange={(e) => onChange(setParam(node, "command", e.target.value))}
+              spellCheck={false}
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Runs in a clone of the agent repo. Available env:{" "}
+              <code>$AGENT_NAME</code>, <code>$REPO_URL</code>,{" "}
+              <code>$COMMIT_SHA</code>, <code>$REF</code>.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="workdir">Workdir</Label>
+            <Input
+              id="workdir"
+              value={workdir}
+              onChange={(e) =>
+                onChange(setParam(node, "workdir", e.target.value))
+              }
+              placeholder="."
+              className="font-mono text-xs"
+            />
+          </div>
+        </>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor="timeout">Timeout (seconds)</Label>
+        <Input
+          id="timeout"
+          type="number"
+          min={10}
+          max={3600}
+          value={timeout}
+          onChange={(e) =>
+            onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+          }
+        />
       </div>
     </div>
   );

@@ -12,6 +12,13 @@ services:
       - "8081:8080"   # ingress
       - "9070:9070"   # admin
 
+  # NOTE: this stack reuses the buildkitd + registry from the sibling
+  # `langship` compose project — both already publish on
+  # 127.0.0.1:1234 (BuildKit) and 127.0.0.1:5000 (registry). Bringing them
+  # up here would collide on the same host ports. If you ever run flow
+  # standalone (without that other stack), uncomment the services in
+  # docker-compose.standalone.yml.
+
   flow:
     build: .
     ports:
@@ -25,9 +32,14 @@ services:
       - RESTATE_INGRESS_URL=http://restate:8080
       - RESTATE_ADMIN_URL=http://restate:9070
       - RESTATE_DEPLOYMENT_URI=http://flow:9080
+      - BUILDKIT_HOST=tcp://host.docker.internal:1234
     depends_on:
       - mongo
       - restate
+    # buildkitd + registry are external (the sibling langship stack); see
+    # the note above. Add `external_links: ["langship-buildkitd:buildkitd",
+    # "langship-registry:registry"]` if you run flow as docker-compose and
+    # need network connectivity to those containers.
 
   web:
     build: ./web

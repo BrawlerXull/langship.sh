@@ -47,6 +47,9 @@ interface PipelineCanvasProps {
    *  the legacy fixed height. Use when the page wraps the canvas in its own
    *  layout (e.g. flow editor pages). */
   fullBleed?: boolean;
+  /** Per-node run status overlay. Keys are node names. Drives the colored
+   *  ring + status icon on each FlowNode. Used by the live execution view. */
+  nodeStatuses?: Record<string, "pending" | "running" | "success" | "failed" | "paused">;
 }
 
 // Public component: keys on pipelineId so a fresh inner instance mounts when
@@ -65,6 +68,7 @@ function CanvasInner({
   onChange,
   readOnly,
   fullBleed,
+  nodeStatuses,
 }: PipelineCanvasProps) {
   // Compute initial RF state once. The canvas owns it from here on.
   const initial = useMemo(() => toReactFlow(initialValue ?? null), []);
@@ -229,7 +233,17 @@ function CanvasInner({
         onDrop={onDrop}
       >
         <ReactFlow
-          nodes={nodes}
+          nodes={
+            nodeStatuses
+              ? nodes.map((n) => ({
+                  ...n,
+                  data: {
+                    ...n.data,
+                    runStatus: nodeStatuses[n.id] ?? "pending",
+                  },
+                }))
+              : nodes
+          }
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
