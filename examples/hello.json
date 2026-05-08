@@ -1,0 +1,49 @@
+{
+  "name": "hello",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [0, 0]
+    },
+    {
+      "id": "2",
+      "name": "Set Greeting",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "name": "greeting", "value": "hello, flow", "type": "string" },
+            { "name": "version", "value": 1, "type": "number" }
+          ]
+        }
+      },
+      "position": [200, 0]
+    },
+    {
+      "id": "3",
+      "name": "End",
+      "type": "n8n-nodes-base.noop",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [400, 0]
+    }
+  ],
+  "connections": {
+    "Trigger": {
+      "main": [
+        [{ "node": "Set Greeting", "type": "main", "index": 0 }]
+      ]
+    },
+    "Set Greeting": {
+      "main": [
+        [{ "node": "End", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {}
+}

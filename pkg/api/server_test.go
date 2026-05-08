@@ -330,18 +330,15 @@ func TestResume_unwiredIngress503(t *testing.T) {
 	}
 }
 
-func TestSPA_fallsBackToIndexForUnknownRoutes(t *testing.T) {
-	// Without any Assets, SPA handler returns the no-bundle notice.
+func TestNonAPI_returns404(t *testing.T) {
+	// API server no longer hosts the SPA — the UI is a separate process.
 	srv := NewServer(ServerDeps{})
 	for _, path := range []string{"/", "/flows/abc", "/runs/123"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, r)
-		if w.Code != http.StatusOK {
-			t.Errorf("%s: got %d", path, w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "html") {
-			t.Errorf("%s: expected html body", path)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: got %d, want 404", path, w.Code)
 		}
 	}
 }

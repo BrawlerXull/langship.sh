@@ -1,9 +1,8 @@
 // Package api provides the HTTP server for flow.
 //
-// It serves:
-//   - /api/health      — readiness probe
-//   - /api/workflows   — workflow CRUD (in-memory placeholder until storage lands)
-//   - /                — embedded SPA (any non-/api path returns index.html)
+// It serves only the JSON API under /api/*. The UI is a separate process
+// (see ./web — nginx in prod, `next dev` locally) that proxies /api to here.
+// Anything outside /api returns 404.
 //
 // The router is intentionally std-library only at this stage; we'll lift in a
 // proper router (chi or gin) when the API surface grows.
@@ -15,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -38,19 +36,21 @@ type FlowSummary struct {
 }
 
 // ServerDeps groups the construction-time dependencies of the HTTP server.
-// Assets is the embedded UI bundle; Orchestrator drives durable execution;
-// RestateIngressURL is used to resolve Awakeables from the resume handler.
+// Orchestrator drives durable execution; RestateIngressURL is used to
+// resolve Awakeables from the resume handler. CORSOrigins lists allowed
+// browser origins (use "*" to allow any — fine for dev).
 type ServerDeps struct {
-	Assets            fs.FS
 	Orchestrator      orchestrator.Orchestrator
 	RestateIngressURL string
+	CORSOrigins       []string
 }
 
-// Server is a thin HTTP server that bundles API + embedded SPA.
+// Server is a thin JSON API server. It does not serve a frontend.
 type Server struct {
 	mux           *http.ServeMux
 	orch          orchestrator.Orchestrator
 	restateIngres string
+	corsOrigins   []string
 
 	mu    sync.Mutex
 	flows map[string]storedFlow // in-memory placeholder; storage layer lands next
@@ -66,25 +66,32 @@ type storedFlow struct {
 	NodeCount  int             `json:"nodeCount"`
 }
 
-// NewServer constructs a Server with API routes installed and the SPA mounted
-// at "/" using deps.Assets. deps.Orchestrator may be nil — execute routes will
-// then return 503.
+// NewServer constructs an API-only Server. deps.Orchestrator may be nil —
+// execute routes will then return 503.
 func NewServer(deps ServerDeps) *Server {
 	s := &Server{
 		mux:           http.NewServeMux(),
 		orch:          deps.Orchestrator,
 		restateIngres: deps.RestateIngressURL,
+		corsOrigins:   deps.CORSOrigins,
 		flows:         make(map[string]storedFlow),
 	}
-	s.routes(deps.Assets)
+	s.routes()
 	return s
 }
 
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+// ServeHTTP implements http.Handler. CORS is applied here so all routes
+// (including OPTIONS preflight) get the headers.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.applyCORS(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
-func (s *Server) routes(assets fs.FS) {
-	// API
+func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/workflows", s.handleListFlows)
 	s.mux.HandleFunc("POST /api/workflows", s.handleCreateFlow)
@@ -95,8 +102,35 @@ func (s *Server) routes(assets fs.FS) {
 	s.mux.HandleFunc("GET /api/executions/{id}", s.handleGetExecution)
 	s.mux.HandleFunc("POST /api/executions/{id}/resume", s.handleResumeExecution)
 
-	// SPA: any path not starting with /api falls through to the embedded bundle.
-	s.mux.Handle("/", spaHandler(assets))
+	// Anything not under /api/ is not our concern — the UI server handles it.
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no handler for %s", r.URL.Path))
+	})
+}
+
+// applyCORS sets the response headers needed for the UI process to call us
+// from a different origin. In dev that's http://localhost:3000; in prod it's
+// the nginx web container (same origin via proxy, but harmless to allow).
+func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	allowed := false
+	for _, o := range s.corsOrigins {
+		if o == "*" || o == origin {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Vary", "Origin")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+	w.Header().Set("Access-Control-Max-Age", "600")
 }
 
 // --- handlers -------------------------------------------------------------
@@ -385,75 +419,6 @@ func (s *Server) parseExecuteRequest(body []byte) (json.RawMessage, []models.Ite
 	}
 	return nil, nil, errors.New("either workflow or workflow_id is required")
 }
-
-// --- SPA -----------------------------------------------------------------
-
-// spaHandler serves static assets from fsys; falls back to index.html for any
-// non-asset GET so client-side routing works on refresh.
-func spaHandler(fsys fs.FS) http.Handler {
-	if fsys == nil {
-		// Frontend not built; render a small notice instead of a blank page.
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				writeError(w, http.StatusNotFound, errors.New("frontend not built"))
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(noBundleHTML))
-		})
-	}
-
-	files := http.FS(fsys)
-	fileServer := http.FileServer(files)
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			writeError(w, http.StatusNotFound, errors.New("not found"))
-			return
-		}
-		// If the requested asset exists, serve it. Otherwise fall back to index.html.
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			serveIndex(w, r, fsys)
-			return
-		}
-		if f, err := fsys.Open(path); err == nil {
-			_ = f.Close()
-			// Long cache for fingerprinted assets, no-cache for index.html.
-			if strings.HasPrefix(path, "assets/") {
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			}
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		serveIndex(w, r, fsys)
-	})
-}
-
-func serveIndex(w http.ResponseWriter, _ *http.Request, fsys fs.FS) {
-	data, err := fs.ReadFile(fsys, "index.html")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write(data)
-}
-
-const noBundleHTML = `<!doctype html>
-<html><head><title>flow</title>
-<style>
-  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-  .card{max-width:420px;padding:32px;border:1px solid #334155;border-radius:12px;background:#1e293b}
-  h1{margin:0 0 8px;font-size:18px}
-  code{background:#0f172a;padding:2px 6px;border-radius:4px;font-size:12px}
-</style></head>
-<body><div class="card">
-  <h1>flow — frontend not built</h1>
-  <p>Run <code>cd web && npm install && npm run build</code> and rebuild the binary to ship the UI.</p>
-</div></body></html>`
 
 // --- helpers --------------------------------------------------------------
 

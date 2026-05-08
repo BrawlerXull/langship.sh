@@ -1,0 +1,30 @@
+# air config — https://github.com/air-verse/air
+# Rebuilds and restarts the Go server when *.go files change.
+# UI dev runs separately via `make dev` (Next.js HMR on :3000, /api proxied to :8080).
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  bin = "tmp/flow"
+  cmd = "go build -o tmp/flow ./cmd/flow"
+  delay = 200
+  exclude_dir = ["bin", "tmp", "web", "node_modules", ".git", ".next", "out"]
+  exclude_regex = ["_test\\.go$"]
+  include_ext = ["go"]
+  args_bin = ["serve"]
+  kill_delay = "1s"
+  send_interrupt = true
+  stop_on_error = true
+
+[log]
+  time = false
+
+[color]
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  clean_on_exit = true

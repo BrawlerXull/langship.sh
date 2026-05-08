@@ -27,7 +27,9 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarSeparator,
+  useSidebar,
 } from "@/components/ui/sidebar";
+import { PanelLeftClose, PanelLeft } from "lucide-react";
 
 type NavItem = {
   title: string;
@@ -38,13 +40,13 @@ type NavItem = {
 
 const primary: NavItem[] = [
   {
-    title: "Flows",
+    title: "Pipelines",
     href: "/",
     icon: LayoutGrid,
     match: (p) => p === "/" || p.startsWith("/flows/view"),
   },
   {
-    title: "New flow",
+    title: "New pipeline",
     href: "/flows/new",
     icon: PlusCircle,
     match: (p) => p.startsWith("/flows/new"),
@@ -91,7 +93,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <div className="flex flex-col gap-0.5 leading-none">
                   <span className="font-semibold">flow</span>
                   <span className="text-xs text-muted-foreground">
-                    pre-v0.1 · durable workflows
+                    pre-v0.1 · durable pipelines
                   </span>
                 </div>
               </Link>
@@ -169,8 +171,23 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               </a>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          <SidebarMenuItem>
+            <CollapseToggle />
+          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
     </Sidebar>
+  );
+}
+
+function CollapseToggle() {
+  const { toggleSidebar, state } = useSidebar();
+  const collapsed = state === "collapsed";
+  const Icon = collapsed ? PanelLeft : PanelLeftClose;
+  return (
+    <SidebarMenuButton onClick={toggleSidebar} className="text-muted-foreground">
+      <Icon className="size-4" />
+      <span>{collapsed ? "Expand" : "Collapse"}</span>
+    </SidebarMenuButton>
   );
 }

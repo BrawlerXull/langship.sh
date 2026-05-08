@@ -1,4 +1,11 @@
 services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
   restate:
     image: docker.io/restatedev/restate:latest
     ports:
@@ -8,11 +15,25 @@ services:
   flow:
     build: .
     ports:
-      - "8080:8080"   # UI + API
-      - "9080:9080"   # restate callback
+      - "8080:8080"   # JSON API
+      - "9080:9080"   # restate callback endpoint
     environment:
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=flow
+      - FLOW_CORS_ORIGINS=http://localhost:3000,http://web:3000
       - RESTATE_INGRESS_URL=http://restate:8080
       - RESTATE_ADMIN_URL=http://restate:9070
       - RESTATE_DEPLOYMENT_URI=http://flow:9080
     depends_on:
+      - mongo
       - restate
+
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"   # UI (open this in your browser)
+    depends_on:
+      - flow
+
+volumes:
+  mongo-data:

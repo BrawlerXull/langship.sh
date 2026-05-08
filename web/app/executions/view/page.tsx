@@ -105,7 +105,7 @@ function ExecutionView() {
   const terminal = ["success", "completed", "failed", "error"].includes(s.toLowerCase());
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6">
       <div className="flex items-center justify-end gap-2">
         <Button
           variant="outline"

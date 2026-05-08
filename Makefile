@@ -1,4 +1,4 @@
-.PHONY: build run serve test vet tidy clean web web-dev dev
+.PHONY: build run serve test vet tidy clean web web-dev dev watch
 
 BINARY := bin/flow
 
@@ -15,13 +15,22 @@ web:
 web-dev:
 	cd web && (test -d node_modules || npm install --no-fund --no-audit --loglevel=error) && npm run dev
 
-# `make dev` runs the Vite dev server (auto-installs deps).
-# In another terminal run `make serve` to start the Go API on :8080;
-# the Vite proxy forwards /api/* requests to it.
+# `make dev` runs the Next.js dev server (auto-installs deps).
+# In another terminal run `make watch` to hot-reload the Go API on :8080;
+# the Next dev rewrite forwards /api/* requests to it.
 dev: web-dev
 
 serve: build-go
 	./$(BINARY) serve
+
+# Hot-reload the Go server with air. Re-run on every *.go change.
+# First time: `go install github.com/air-verse/air@latest`
+watch:
+	@command -v air >/dev/null 2>&1 || { \
+	  echo "installing air..."; \
+	  go install github.com/air-verse/air@latest; \
+	}
+	air
 
 run: build
 	./$(BINARY)

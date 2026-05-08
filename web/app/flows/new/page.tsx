@@ -1,65 +1,71 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { Save } from "lucide-react";
+import { ArrowLeft, FileJson, LayoutGrid, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { PipelineCanvas } from "@/components/canvas/pipeline-canvas";
 import { api } from "@/lib/api";
+import type { PipelineDefinition } from "@/lib/pipeline-graph";
+import Link from "next/link";
 
-const sample = `{
-  "name": "Hello",
-  "nodes": [
+const STARTER: PipelineDefinition = {
+  name: "",
+  nodes: [
     {
-      "id": "1",
-      "name": "When clicked",
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
-      "position": [0, 0],
-      "parameters": {}
+      id: "1",
+      name: "Trigger",
+      type: "flow-nodes-base.trigger",
+      typeVersion: 1,
+      parameters: {},
+      position: [0, 0],
     },
-    {
-      "id": "2",
-      "name": "Set",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [200, 0],
-      "parameters": { "values": { "string": [{ "name": "msg", "value": "hello" }] } }
-    }
   ],
-  "connections": {
-    "When clicked": { "main": [[{ "node": "Set", "type": "main", "index": 0 }]] }
-  }
-}`;
+  connections: {},
+};
 
-export default function NewFlowPage() {
+type Tab = "canvas" | "json";
+
+export default function NewPipelinePage() {
   const router = useRouter();
   const [name, setName] = useState("");
-  const [definition, setDefinition] = useState(sample);
+  const [tab, setTab] = useState<Tab>("canvas");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const defRef = useRef<PipelineDefinition>(STARTER);
+  const [jsonDraft, setJsonDraft] = useState(JSON.stringify(STARTER, null, 2));
+
+  function switchTab(next: Tab) {
+    if (next === "json") {
+      setJsonDraft(JSON.stringify({ ...defRef.current, name }, null, 2));
+      setTab(next);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(jsonDraft) as PipelineDefinition;
+      defRef.current = parsed;
+      if (parsed.name) setName(parsed.name);
+      setError(null);
+    } catch (e) {
+      setError(`JSON parse failed: ${(e as Error).message}`);
+      return;
+    }
+    setTab(next);
+  }
 
   async function onSave() {
     setSaving(true);
     setError(null);
     try {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(definition);
-      } catch (e) {
-        throw new Error(`Definition must be valid JSON: ${(e as Error).message}`);
-      }
-      const { id } = await api.createFlow({ name, definition: parsed });
+      const toSave: PipelineDefinition =
+        tab === "json" ? JSON.parse(jsonDraft) : defRef.current;
+      const { id } = await api.createFlow({
+        name,
+        definition: { ...toSave, name },
+      });
       router.push(`/flows/view/?id=${encodeURIComponent(id)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "save failed");
@@ -69,59 +75,110 @@ export default function NewFlowPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">New flow</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Paste an n8n workflow export, or start from the sample below.
-        </p>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Definition</CardTitle>
-          <CardDescription>
-            n8n-format JSON. Drafts are validated leniently; strict validation runs on
-            execute.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My flow (optional — uses workflow.name if blank)"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="def">Workflow JSON</Label>
+    <div className="flex h-screen flex-col">
+      <Toolbar
+        name={name}
+        onName={setName}
+        tab={tab}
+        onTab={switchTab}
+        onSave={onSave}
+        saving={saving}
+        title="New pipeline"
+      />
+      {error && (
+        <div className="border-b border-destructive/40 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+      <div className="relative min-h-0 flex-1">
+        {tab === "canvas" ? (
+          <PipelineCanvas
+            initialValue={defRef.current}
+            pipelineId="new"
+            onChange={(d) => {
+              defRef.current = d;
+            }}
+            fullBleed
+          />
+        ) : (
+          <div className="h-full p-4">
             <Textarea
-              id="def"
-              rows={20}
-              value={definition}
-              onChange={(e) => setDefinition(e.target.value)}
+              value={jsonDraft}
+              onChange={(e) => setJsonDraft(e.target.value)}
               spellCheck={false}
-              className="text-xs"
+              className="h-full text-xs"
             />
           </div>
-          {error && (
-            <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-              {error}
-            </p>
-          )}
-          <div className="flex justify-end gap-2">
-            <Link href="/">
-              <Button variant="ghost">Cancel</Button>
-            </Link>
-            <Button onClick={onSave} disabled={saving}>
-              <Save />
-              {saving ? "Saving…" : "Save flow"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Toolbar(props: {
+  name: string;
+  onName: (v: string) => void;
+  tab: Tab;
+  onTab: (t: Tab) => void;
+  onSave: () => void;
+  saving: boolean;
+  title: string;
+}) {
+  return (
+    <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-background/80 px-3 backdrop-blur">
+      <Button variant="ghost" size="icon" asChild aria-label="Back">
+        <Link href="/">
+          <ArrowLeft className="size-4" />
+        </Link>
+      </Button>
+      <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        {props.title}
+      </div>
+      <Input
+        value={props.name}
+        onChange={(e) => props.onName(e.target.value)}
+        placeholder="Pipeline name"
+        className="ml-1 h-8 max-w-[280px] text-sm"
+      />
+      <div className="flex-1" />
+      <Tabs value={props.tab} onChange={props.onTab} />
+      <Button onClick={props.onSave} disabled={props.saving} size="sm">
+        <Save />
+        {props.saving ? "Saving…" : "Save"}
+      </Button>
+    </div>
+  );
+}
+
+function Tabs({ value, onChange }: { value: Tab; onChange: (next: Tab) => void }) {
+  return (
+    <div className="inline-flex rounded-md border bg-muted/30 p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange("canvas")}
+        className={
+          "flex items-center gap-1 rounded-sm px-2 py-1 text-xs transition-colors " +
+          (value === "canvas"
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground hover:text-foreground")
+        }
+      >
+        <LayoutGrid className="size-3.5" />
+        Canvas
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("json")}
+        className={
+          "flex items-center gap-1 rounded-sm px-2 py-1 text-xs transition-colors " +
+          (value === "json"
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground hover:text-foreground")
+        }
+      >
+        <FileJson className="size-3.5" />
+        Raw JSON
+      </button>
     </div>
   );
 }

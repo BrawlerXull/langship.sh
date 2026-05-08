@@ -33,13 +33,14 @@ export default function DashboardPage() {
 
   useEffect(() => {
     load();
-    api.health()
+    api
+      .health()
       .then(() => setHealth("ok"))
       .catch(() => setHealth("down"));
   }, []);
 
   async function onDelete(id: string) {
-    if (!confirm("Delete this flow?")) return;
+    if (!confirm("Delete this pipeline?")) return;
     try {
       await api.deleteFlow(id);
       await load();
@@ -49,12 +50,13 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 p-6">
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Flows</h1>
+          <h1 className="text-3xl font-semibold tracking-tight">Pipelines</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Durable, n8n-compatible workflows. Paste exported JSON to import.
+            Durable, n8n-compatible pipelines. Build on the canvas or paste exported
+            JSON to import.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -74,12 +76,12 @@ export default function DashboardPage() {
             <RefreshCw />
             Refresh
           </Button>
-          <Link href="/flows/new">
-            <Button size="sm">
+          <Button size="sm" asChild>
+            <Link href="/flows/new">
               <Plus />
-              New flow
-            </Button>
-          </Link>
+              New pipeline
+            </Link>
+          </Button>
         </div>
       </div>
 
@@ -100,7 +102,9 @@ export default function DashboardPage() {
               <CardHeader>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <CardTitle className="truncate">{f.name || "Untitled flow"}</CardTitle>
+                    <CardTitle className="truncate">
+                      {f.name || "Untitled pipeline"}
+                    </CardTitle>
                     <CardDescription className="mt-1 truncate font-mono text-[11px]">
                       {f.id}
                     </CardDescription>
@@ -111,23 +115,24 @@ export default function DashboardPage() {
               <CardContent className="flex items-center justify-between text-sm text-muted-foreground">
                 <div className="flex items-center gap-3">
                   <span>
-                    <span className="font-medium text-foreground">{f.nodeCount}</span> nodes
+                    <span className="font-medium text-foreground">{f.nodeCount}</span>{" "}
+                    nodes
                   </span>
                   <span>·</span>
                   <span>{formatDate(f.updatedAt)}</span>
                 </div>
                 <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                  <Link href={`/flows/view/?id=${encodeURIComponent(f.id)}`}>
-                    <Button size="sm" variant="ghost">
+                  <Button size="sm" variant="ghost" asChild>
+                    <Link href={`/flows/view/?id=${encodeURIComponent(f.id)}`}>
                       <Activity />
                       Open
-                    </Button>
-                  </Link>
+                    </Link>
+                  </Button>
                   <Button
                     size="icon"
                     variant="ghost"
                     onClick={() => onDelete(f.id)}
-                    aria-label="Delete flow"
+                    aria-label="Delete pipeline"
                   >
                     <Trash2 />
                   </Button>
@@ -167,14 +172,14 @@ function EmptyState() {
           <Plus className="h-5 w-5 text-muted-foreground" />
         </div>
         <div>
-          <p className="text-sm font-medium">No flows yet</p>
+          <p className="text-sm font-medium">No pipelines yet</p>
           <p className="text-sm text-muted-foreground">
-            Import an n8n workflow JSON to get started.
+            Build one on the canvas, or import an n8n workflow JSON.
           </p>
         </div>
-        <Link href="/flows/new">
-          <Button size="sm">Create your first flow</Button>
-        </Link>
+        <Button size="sm" asChild>
+          <Link href="/flows/new">Create your first pipeline</Link>
+        </Button>
       </CardContent>
     </Card>
   );

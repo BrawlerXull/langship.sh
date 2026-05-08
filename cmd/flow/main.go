@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/executors"
 	"github.com/lyzrai/flow/pkg/orchestrator"
-	"github.com/lyzrai/flow/web"
 )
 
 func main() {
@@ -52,6 +52,7 @@ usage:
 
 env vars (for `+"`flow serve`"+`):
   FLOW_ADDR                  HTTP listen address (default :8080)
+  FLOW_CORS_ORIGINS          comma-separated allow-list (default *)
   RESTATE_INGRESS_URL        Restate ingress URL (default http://localhost:8081)
   RESTATE_ADMIN_URL          Restate admin URL (default http://localhost:9070)
   RESTATE_SERVICE_ADDR       Restate service-endpoint listen addr (default :9080)
@@ -131,13 +132,14 @@ func serve() int {
 		slog.Info("registered with restate", slog.String("deploy_uri", deployURI))
 	}()
 
-	// HTTP server (UI + API).
+	// HTTP API server. The UI runs in a separate process (nginx in prod,
+	// `next dev` locally) and proxies /api to here.
 	srv := &http.Server{
 		Addr: addr,
 		Handler: api.NewServer(api.ServerDeps{
-			Assets:            web.Dist(),
 			Orchestrator:      orch,
 			RestateIngressURL: orch.IngressURL(),
+			CORSOrigins:       parseCSV(envOr("FLOW_CORS_ORIGINS", "*")),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -178,4 +180,15 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseCSV(v string) []string {
+	out := []string{}
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
