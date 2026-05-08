@@ -31,6 +31,8 @@ export function NodeForm({ node, onChange }: NodeFormProps) {
       return <PolicyForm node={node} onChange={onChange} />;
     case "flow-nodes-base.waitForApproval":
       return <ApprovalForm node={node} onChange={onChange} />;
+    case "flow-nodes-base.push":
+      return <PushForm node={node} onChange={onChange} />;
     case "flow-nodes-base.deploy":
       return <DeployForm node={node} onChange={onChange} />;
     case "flow-nodes-base.promote":
@@ -48,6 +50,7 @@ export function hasTypedForm(type: string): boolean {
   return [
     "flow-nodes-base.trigger",
     "flow-nodes-base.build",
+    "flow-nodes-base.push",
     "flow-nodes-base.test",
     "flow-nodes-base.eval",
     "flow-nodes-base.policy",
@@ -80,6 +83,12 @@ function getNumber(node: PipelineNode, key: string, fallback = 0): number {
 function getStringArray(node: PipelineNode, key: string): string[] {
   const v = node.parameters?.[key];
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function getBool(node: PipelineNode, key: string, fallback: boolean): boolean {
+  const v = node.parameters?.[key];
+  if (typeof v === "boolean") return v;
+  return fallback;
 }
 
 // --- forms ----------------------------------------------------------------
@@ -470,6 +479,141 @@ function ApprovalForm({ node, onChange }: NodeFormProps) {
           placeholder="user@example.com"
         />
       </div>
+    </div>
+  );
+}
+
+function PushForm({ node, onChange }: NodeFormProps) {
+  const srcImage = getString(node, "srcImage", "");
+  const targetRegistry = getString(node, "targetRegistry", "ghcr.io");
+  const targetImage = getString(node, "targetImage", "");
+  const tag = getString(node, "tag", "");
+  const username = getString(node, "username", "");
+  const password = getString(node, "password", "");
+  const srcInsecure = getBool(node, "srcInsecure", true);
+  const dstInsecure = getBool(node, "dstInsecure", false);
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label htmlFor="push-src">Source image (optional)</Label>
+        <Input
+          id="push-src"
+          value={srcImage}
+          onChange={(e) => onChange(setParam(node, "srcImage", e.target.value))}
+          placeholder="registry:5000/owner/agent:sha (defaults to upstream Build output)"
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Leave blank to use the upstream Build node&rsquo;s{" "}
+          <code className="font-mono">__build.image</code>.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="push-reg">Target registry</Label>
+          <Input
+            id="push-reg"
+            value={targetRegistry}
+            onChange={(e) =>
+              onChange(setParam(node, "targetRegistry", e.target.value))
+            }
+            placeholder="ghcr.io"
+            className="font-mono text-xs"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="push-tag">Tag</Label>
+          <Input
+            id="push-tag"
+            value={tag}
+            onChange={(e) => onChange(setParam(node, "tag", e.target.value))}
+            placeholder="defaults to commit SHA, then 'latest'"
+            className="font-mono text-xs"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="push-img">Target image</Label>
+        <Input
+          id="push-img"
+          value={targetImage}
+          onChange={(e) => onChange(setParam(node, "targetImage", e.target.value))}
+          placeholder="org/agent"
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Final ref: <code className="font-mono">{targetRegistry || "<registry>"}/{targetImage || "<image>"}:{tag || "<tag>"}</code>
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="push-user">Username</Label>
+          <Input
+            id="push-user"
+            value={username}
+            onChange={(e) => onChange(setParam(node, "username", e.target.value))}
+            placeholder="(empty = anonymous / docker config)"
+            className="font-mono text-xs"
+            autoComplete="off"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="push-pass">Password / token</Label>
+          <Input
+            id="push-pass"
+            type="password"
+            value={password}
+            onChange={(e) => onChange(setParam(node, "password", e.target.value))}
+            placeholder="ghp_… or registry password"
+            className="font-mono text-xs"
+            autoComplete="new-password"
+          />
+        </div>
+      </div>
+
+      <div className="rounded-md border bg-muted/20 p-2 text-[11px]">
+        <div className="mb-1 font-medium uppercase tracking-wider text-muted-foreground">
+          Insecure transport
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            id="push-src-insecure"
+            type="checkbox"
+            checked={srcInsecure}
+            onChange={(e) =>
+              onChange(setParam(node, "srcInsecure", e.target.checked))
+            }
+            className="size-3.5"
+          />
+          <Label htmlFor="push-src-insecure" className="text-[11px]">
+            Source allows HTTP (default; the local{" "}
+            <code className="font-mono">registry:5000</code> serves plain HTTP)
+          </Label>
+        </div>
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            id="push-dst-insecure"
+            type="checkbox"
+            checked={dstInsecure}
+            onChange={(e) =>
+              onChange(setParam(node, "dstInsecure", e.target.checked))
+            }
+            className="size-3.5"
+          />
+          <Label htmlFor="push-dst-insecure" className="text-[11px]">
+            Destination allows HTTP (off — public registries are HTTPS)
+          </Label>
+        </div>
+      </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        Image is pulled from the source over OCI v2 and pushed to the target;
+        no docker daemon needed. For GHCR, the password is a PAT with{" "}
+        <code className="font-mono">write:packages</code>.
+      </p>
     </div>
   );
 }

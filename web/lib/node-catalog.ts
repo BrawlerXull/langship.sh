@@ -21,6 +21,7 @@ import {
   Undo2,
   CircleSlash,
   Settings2,
+  UploadCloud,
 } from "lucide-react";
 
 export type CatalogEntry = {
@@ -131,6 +132,26 @@ export const CATALOG: CatalogEntry[] = [
       reviewers: [],
     },
     group: "gate",
+  },
+  {
+    type: "flow-nodes-base.push",
+    label: "Push",
+    description:
+      "Mirror the locally-built image to an external registry (GHCR, Docker Hub, ECR, etc.).",
+    icon: UploadCloud,
+    color: "bg-cyan-500",
+    outputs: 1,
+    defaults: {
+      // srcImage left empty — defaults to upstream __build.image
+      targetRegistry: "ghcr.io",
+      targetImage: "",
+      tag: "",
+      username: "",
+      password: "",
+      srcInsecure: true,
+      dstInsecure: false,
+    },
+    group: "deploy",
   },
   {
     type: "flow-nodes-base.deploy",
