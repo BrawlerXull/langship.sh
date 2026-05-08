@@ -1,0 +1,521 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/lyzrai/flow/pkg/engine"
+	"github.com/lyzrai/flow/pkg/github"
+	"github.com/lyzrai/flow/pkg/models"
+	"github.com/lyzrai/flow/pkg/orchestrator"
+	"github.com/lyzrai/flow/pkg/storage"
+)
+
+// Agent is the wire shape of an agent record. PAT and webhook secret are
+// scrubbed; HasPAT and webhook fields surface only the safe parts.
+type Agent struct {
+	ID                 string             `json:"id"`
+	Name               string             `json:"name"`
+	RepoURL            string             `json:"repoUrl"`
+	Ref                string             `json:"ref,omitempty"`
+	HasPAT             bool               `json:"hasPat"`
+	WebhookID          int64              `json:"webhookId,omitempty"`
+	WebhookURL         string             `json:"webhookUrl,omitempty"`
+	WebhookInstalled   bool               `json:"webhookInstalled"`
+	WebhookInstalledAt *time.Time         `json:"webhookInstalledAt,omitempty"`
+	AuthStatus         storage.AuthStatus `json:"authStatus,omitempty"`
+	AuthCheckedAt      *time.Time         `json:"authCheckedAt,omitempty"`
+	AttachedPipelines  []string           `json:"attachedPipelines,omitempty"`
+	CreatedAt          time.Time          `json:"createdAt"`
+	UpdatedAt          time.Time          `json:"updatedAt"`
+}
+
+func (s *Server) publicAgent(a *storage.Agent) Agent {
+	return Agent{
+		ID:                 a.ID,
+		Name:               a.Name,
+		RepoURL:            a.RepoURL,
+		Ref:                a.Ref,
+		HasPAT:             a.PAT != "",
+		WebhookID:          a.WebhookID,
+		WebhookURL:         s.webhookURLFor(a.ID),
+		WebhookInstalled:   a.WebhookID != 0,
+		WebhookInstalledAt: a.WebhookInstalledAt,
+		AuthStatus:         a.AuthStatus,
+		AuthCheckedAt:      a.AuthCheckedAt,
+		AttachedPipelines:  a.AttachedPipelines,
+		CreatedAt:          a.CreatedAt,
+		UpdatedAt:          a.UpdatedAt,
+	}
+}
+
+func (s *Server) webhookURLFor(agentID string) string {
+	if s.publicURL == "" {
+		return ""
+	}
+	return s.publicURL + "/webhooks/github/" + agentID
+}
+
+// --- CRUD -----------------------------------------------------------------
+
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := s.agents.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]Agent, 0, len(agents))
+	for _, a := range agents {
+		out = append(out, s.publicAgent(a))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RepoURL string `json:"repoUrl"`
+		PAT     string `json:"pat"`
+		Ref     string `json:"ref,omitempty"`
+		Name    string `json:"name,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	repo := strings.TrimSpace(body.RepoURL)
+	if repo == "" {
+		writeError(w, http.StatusBadRequest, errors.New("repoUrl is required"))
+		return
+	}
+	if _, err := url.Parse(repo); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid repoUrl: %w", err))
+		return
+	}
+
+	now := time.Now().UTC()
+	id := newID()
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = deriveAgentName(repo)
+	}
+	ref := strings.TrimSpace(body.Ref)
+	if ref == "" {
+		ref = "main"
+	}
+
+	a := &storage.Agent{
+		ID:         id,
+		Name:       name,
+		RepoURL:    repo,
+		Ref:        ref,
+		PAT:        strings.TrimSpace(body.PAT),
+		AuthStatus: storage.AuthUntested,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := s.agents.Create(r.Context(), a); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.publicAgent(a))
+}
+
+func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.publicAgent(a))
+}
+
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	// Best-effort uninstall webhook before deleting, so we don't leak
+	// dangling hooks pointing at a dead agent ID.
+	if a, err := s.agents.Get(r.Context(), id); err == nil && a.WebhookID != 0 {
+		if repo, perr := github.ParseRepo(a.RepoURL); perr == nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			_ = github.NewClient(a.PAT).UninstallWebhook(ctx, repo, a.WebhookID)
+			cancel()
+		}
+	}
+	if err := s.agents.Delete(r.Context(), id); err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- auth probe ----------------------------------------------------------
+
+func (s *Server) handleTestAgentAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	repo, err := github.ParseRepo(a.RepoURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	authErr := github.NewClient(a.PAT).TestAuth(ctx, repo)
+
+	now := time.Now().UTC()
+	a.AuthCheckedAt = &now
+	if authErr == nil {
+		a.AuthStatus = storage.AuthOK
+	} else {
+		a.AuthStatus = storage.AuthFailed
+	}
+	a.UpdatedAt = now
+	if uerr := s.agents.Update(r.Context(), a); uerr != nil {
+		writeError(w, http.StatusInternalServerError, uerr)
+		return
+	}
+	resp := map[string]any{
+		"authStatus":    a.AuthStatus,
+		"authCheckedAt": a.AuthCheckedAt,
+	}
+	if authErr != nil {
+		resp["error"] = authErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- webhook install / uninstall -----------------------------------------
+
+func (s *Server) handleInstallWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.publicURL == "" {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("FLOW_PUBLIC_URL is not configured"))
+		return
+	}
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	if a.PAT == "" {
+		writeError(w, http.StatusBadRequest, errors.New("agent has no PAT — re-create with one"))
+		return
+	}
+	repo, err := github.ParseRepo(a.RepoURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Fresh secret per install so rotating is just "uninstall + install".
+	secret, err := github.GenerateSecret()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	callback := s.webhookURLFor(id)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	hookID, err := github.NewClient(a.PAT).InstallWebhook(ctx, repo, callback, secret)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	now := time.Now().UTC()
+	a.WebhookID = hookID
+	a.WebhookSecret = secret
+	a.WebhookInstalledAt = &now
+	a.UpdatedAt = now
+	if err := s.agents.Update(r.Context(), a); err != nil {
+		// Try to roll back the hook so we don't leak it.
+		_ = github.NewClient(a.PAT).UninstallWebhook(ctx, repo, hookID)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.publicAgent(a))
+}
+
+func (s *Server) handleUninstallWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	if a.WebhookID == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("no webhook installed"))
+		return
+	}
+	repo, err := github.ParseRepo(a.RepoURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := github.NewClient(a.PAT).UninstallWebhook(ctx, repo, a.WebhookID); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	a.WebhookID = 0
+	a.WebhookSecret = ""
+	a.WebhookInstalledAt = nil
+	a.UpdatedAt = time.Now().UTC()
+	if err := s.agents.Update(r.Context(), a); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.publicAgent(a))
+}
+
+// --- pipeline attachments ------------------------------------------------
+
+func (s *Server) handleAttachPipeline(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pipelineID := r.PathValue("pipelineId")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	if _, err := s.pipelines.Get(r.Context(), pipelineID); err != nil {
+		writeStorageErr(w, err, "pipeline not found")
+		return
+	}
+	for _, existing := range a.AttachedPipelines {
+		if existing == pipelineID {
+			writeJSON(w, http.StatusOK, s.publicAgent(a)) // already attached
+			return
+		}
+	}
+	a.AttachedPipelines = append(a.AttachedPipelines, pipelineID)
+	a.UpdatedAt = time.Now().UTC()
+	if err := s.agents.Update(r.Context(), a); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.publicAgent(a))
+}
+
+func (s *Server) handleDetachPipeline(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pipelineID := r.PathValue("pipelineId")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	out := a.AttachedPipelines[:0]
+	for _, p := range a.AttachedPipelines {
+		if p != pipelineID {
+			out = append(out, p)
+		}
+	}
+	a.AttachedPipelines = out
+	a.UpdatedAt = time.Now().UTC()
+	if err := s.agents.Update(r.Context(), a); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- manual trigger ------------------------------------------------------
+
+// handleTriggerAgent dispatches a run on each attached pipeline. Trigger
+// data describes who/what triggered the run (manual / webhook / etc.).
+func (s *Server) handleTriggerAgent(w http.ResponseWriter, r *http.Request) {
+	if s.orch == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("orchestrator not configured"))
+		return
+	}
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	if len(a.AttachedPipelines) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("agent has no attached pipelines"))
+		return
+	}
+	triggerData := []map[string]any{{
+		"source":    "manual",
+		"agentId":   a.ID,
+		"agentName": a.Name,
+		"repoUrl":   a.RepoURL,
+		"ref":       a.Ref,
+	}}
+	execIDs, err := s.dispatchAgent(r.Context(), a, triggerData)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"executionIds": execIDs,
+	})
+}
+
+// dispatchAgent runs each attached pipeline asynchronously. Returns the
+// execution IDs collected. Failures on individual pipelines are logged
+// but don't abort the rest.
+func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger any) ([]string, error) {
+	triggerJSON, _ := json.Marshal(trigger)
+	var triggerItems []models.Item
+	if items, ok := trigger.([]map[string]any); ok {
+		for _, m := range items {
+			triggerItems = append(triggerItems, models.Item(m))
+		}
+	}
+
+	out := make([]string, 0, len(a.AttachedPipelines))
+	for _, pid := range a.AttachedPipelines {
+		p, err := s.pipelines.Get(ctx, pid)
+		if err != nil {
+			slog.WarnContext(ctx, "agent_dispatch_pipeline_missing",
+				slog.String("agent_id", a.ID),
+				slog.String("pipeline_id", pid),
+			)
+			continue
+		}
+		wf, err := engine.ParseWorkflow(p.Definition)
+		if err != nil {
+			slog.WarnContext(ctx, "agent_dispatch_parse_failed",
+				slog.String("pipeline_id", pid),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		execID, err := s.orch.RunAsync(runCtx, &orchestrator.RunRequest{
+			RequestMeta: orchestrator.RequestMeta{WorkflowID: pid},
+			Workflow:    wf,
+			TriggerData: triggerItems,
+		})
+		cancel()
+		if err != nil {
+			slog.WarnContext(ctx, "agent_dispatch_failed",
+				slog.String("pipeline_id", pid),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		if s.runs != nil {
+			_ = s.runs.Insert(ctx, &storage.Run{
+				ID:           execID,
+				PipelineID:   pid,
+				PipelineName: p.Name,
+				Status:       "running",
+				StartedAt:    time.Now().UTC(),
+				TriggerData:  triggerJSON,
+			})
+		}
+		out = append(out, execID)
+	}
+	return out, nil
+}
+
+// --- webhook receiver ----------------------------------------------------
+
+func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a, err := s.agents.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "agent not found")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := github.VerifySignature(r.Header.Get("X-Hub-Signature-256"), a.WebhookSecret, body); err != nil {
+		slog.WarnContext(r.Context(), "github_webhook_signature_invalid",
+			slog.String("agent_id", id),
+			slog.Any("error", err),
+		)
+		writeError(w, http.StatusUnauthorized, errors.New("signature invalid"))
+		return
+	}
+
+	event := r.Header.Get("X-GitHub-Event")
+	switch event {
+	case "ping":
+		writeJSON(w, http.StatusOK, map[string]string{"message": "pong"})
+		return
+	case "push":
+		// fall through
+	default:
+		// Acknowledge unknown events; nothing to dispatch.
+		writeJSON(w, http.StatusOK, map[string]string{"message": "ignored"})
+		return
+	}
+
+	push, err := github.ParsePushEvent(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Per the agent's configured ref: only dispatch if the branch matches.
+	if a.Ref != "" && a.Ref != "*" && github.BranchFromRef(push.Ref) != a.Ref {
+		slog.InfoContext(r.Context(), "github_webhook_ref_mismatch",
+			slog.String("agent_id", id),
+			slog.String("event_ref", push.Ref),
+			slog.String("agent_ref", a.Ref),
+		)
+		writeJSON(w, http.StatusOK, map[string]string{"message": "ref filtered"})
+		return
+	}
+
+	if s.orch == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("orchestrator not configured"))
+		return
+	}
+
+	trigger := []map[string]any{{
+		"source":    "github_push",
+		"agentId":   a.ID,
+		"agentName": a.Name,
+		"repoUrl":   a.RepoURL,
+		"ref":       push.Ref,
+		"branch":    github.BranchFromRef(push.Ref),
+		"commit":    push.After,
+		"pusher":    push.Pusher.Name,
+	}}
+	execIDs, err := s.dispatchAgent(r.Context(), a, trigger)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"executionIds": execIDs,
+	})
+}
+
+// --- helpers -------------------------------------------------------------
+
+// deriveAgentName extracts an "org/repo" name from a git URL. Falls back to
+// the URL itself if parsing fails.
+func deriveAgentName(raw string) string {
+	if r, err := github.ParseRepo(raw); err == nil {
+		return r.String()
+	}
+	return strings.TrimSpace(raw)
+}

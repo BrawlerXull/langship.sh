@@ -16,13 +16,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/models"
 	"github.com/lyzrai/flow/pkg/orchestrator"
+	"github.com/lyzrai/flow/pkg/storage"
 )
 
 // FlowSummary is the list-shape returned to the dashboard.
@@ -38,11 +39,19 @@ type FlowSummary struct {
 // ServerDeps groups the construction-time dependencies of the HTTP server.
 // Orchestrator drives durable execution; RestateIngressURL is used to
 // resolve Awakeables from the resume handler. CORSOrigins lists allowed
-// browser origins (use "*" to allow any — fine for dev).
+// browser origins (use "*" to allow any — fine for dev). Pipelines / Runs /
+// Agents are required — the API has no in-memory fallback.
 type ServerDeps struct {
 	Orchestrator      orchestrator.Orchestrator
 	RestateIngressURL string
 	CORSOrigins       []string
+	// PublicURL is the externally-reachable base URL for this API (e.g.
+	// "https://abcd.trycloudflare.com"). Used to render webhook callback
+	// URLs that GitHub can hit. Empty means webhook install is disabled.
+	PublicURL string
+	Pipelines storage.PipelineStore
+	Runs      storage.RunStore
+	Agents    storage.AgentStore
 }
 
 // Server is a thin JSON API server. It does not serve a frontend.
@@ -51,30 +60,26 @@ type Server struct {
 	orch          orchestrator.Orchestrator
 	restateIngres string
 	corsOrigins   []string
+	publicURL     string
 
-	mu    sync.Mutex
-	flows map[string]storedFlow // in-memory placeholder; storage layer lands next
-}
-
-// Definition is held as raw n8n-format JSON so we don't lose connection
-// shape on round-trip. We parse on read for validation + node count.
-type storedFlow struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Definition json.RawMessage `json:"definition"`
-	UpdatedAt  time.Time       `json:"updatedAt"`
-	NodeCount  int             `json:"nodeCount"`
+	pipelines storage.PipelineStore
+	runs      storage.RunStore
+	agents    storage.AgentStore
 }
 
 // NewServer constructs an API-only Server. deps.Orchestrator may be nil —
-// execute routes will then return 503.
+// execute routes will then return 503. Stores must be non-nil; CRUD routes
+// will panic without them — the API has no in-memory fallback.
 func NewServer(deps ServerDeps) *Server {
 	s := &Server{
 		mux:           http.NewServeMux(),
 		orch:          deps.Orchestrator,
 		restateIngres: deps.RestateIngressURL,
 		corsOrigins:   deps.CORSOrigins,
-		flows:         make(map[string]storedFlow),
+		publicURL:     strings.TrimRight(deps.PublicURL, "/"),
+		pipelines:     deps.Pipelines,
+		runs:          deps.Runs,
+		agents:        deps.Agents,
 	}
 	s.routes()
 	return s
@@ -93,14 +98,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	s.mux.HandleFunc("GET /api/workflows", s.handleListFlows)
 	s.mux.HandleFunc("POST /api/workflows", s.handleCreateFlow)
 	s.mux.HandleFunc("GET /api/workflows/{id}", s.handleGetFlow)
 	s.mux.HandleFunc("PUT /api/workflows/{id}", s.handleUpdateFlow)
 	s.mux.HandleFunc("DELETE /api/workflows/{id}", s.handleDeleteFlow)
 	s.mux.HandleFunc("POST /api/workflows/execute", s.handleExecuteWorkflow)
+	s.mux.HandleFunc("GET /api/executions", s.handleListExecutions)
 	s.mux.HandleFunc("GET /api/executions/{id}", s.handleGetExecution)
 	s.mux.HandleFunc("POST /api/executions/{id}/resume", s.handleResumeExecution)
+
+	// Agents — Langship-style agent registry (git URL + PAT)
+	s.mux.HandleFunc("GET /api/agents", s.handleListAgents)
+	s.mux.HandleFunc("POST /api/agents", s.handleCreateAgent)
+	s.mux.HandleFunc("GET /api/agents/{id}", s.handleGetAgent)
+	s.mux.HandleFunc("DELETE /api/agents/{id}", s.handleDeleteAgent)
+	s.mux.HandleFunc("POST /api/agents/{id}/test-auth", s.handleTestAgentAuth)
+	s.mux.HandleFunc("POST /api/agents/{id}/webhook", s.handleInstallWebhook)
+	s.mux.HandleFunc("DELETE /api/agents/{id}/webhook", s.handleUninstallWebhook)
+	s.mux.HandleFunc("POST /api/agents/{id}/pipelines/{pipelineId}", s.handleAttachPipeline)
+	s.mux.HandleFunc("DELETE /api/agents/{id}/pipelines/{pipelineId}", s.handleDetachPipeline)
+	s.mux.HandleFunc("POST /api/agents/{id}/trigger", s.handleTriggerAgent)
+
+	// Public webhook receiver. GitHub posts here; HMAC signature is the
+	// authentication. Must NOT require CORS / API auth.
+	s.mux.HandleFunc("POST /webhooks/github/{id}", s.handleGitHubWebhook)
 
 	// Anything not under /api/ is not our concern — the UI server handles it.
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -139,17 +162,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleListFlows(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]FlowSummary, 0, len(s.flows))
-	for _, f := range s.flows {
+// handleConfig exposes a few server-side config values to the UI so it can
+// render webhook URLs / decide whether to disable buttons.
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"publicUrl":           s.publicURL,
+		"webhooksAvailable":   s.publicURL != "",
+		"orchestratorEnabled": s.orch != nil,
+	})
+}
+
+func (s *Server) handleListFlows(w http.ResponseWriter, r *http.Request) {
+	pipes, err := s.pipelines.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]FlowSummary, 0, len(pipes))
+	for _, p := range pipes {
 		out = append(out, FlowSummary{
-			ID:        f.ID,
-			Name:      f.Name,
-			UpdatedAt: f.UpdatedAt,
-			NodeCount: f.NodeCount,
-			Status:    "draft",
+			ID:        p.ID,
+			Name:      p.Name,
+			UpdatedAt: p.UpdatedAt,
+			NodeCount: p.NodeCount,
+			Status:    firstNonEmpty(p.Status, "draft"),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -169,30 +205,31 @@ func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	now := time.Now().UTC()
 	id := newID()
-	f := storedFlow{
+	p := &storage.Pipeline{
 		ID:         id,
-		Name:       firstNonEmpty(body.Name, parsedName, "Untitled flow"),
+		Name:       firstNonEmpty(body.Name, parsedName, "Untitled pipeline"),
 		Definition: body.Definition,
-		UpdatedAt:  time.Now().UTC(),
 		NodeCount:  count,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
-	s.mu.Lock()
-	s.flows[id] = f
-	s.mu.Unlock()
+	if err := s.pipelines.Create(r.Context(), p); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
 func (s *Server) handleGetFlow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.mu.Lock()
-	f, ok := s.flows[id]
-	s.mu.Unlock()
-	if !ok {
-		writeError(w, http.StatusNotFound, errors.New("flow not found"))
+	p, err := s.pipelines.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "pipeline not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, f)
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
@@ -205,15 +242,15 @@ func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f, ok := s.flows[id]
-	if !ok {
-		writeError(w, http.StatusNotFound, errors.New("flow not found"))
+
+	p, err := s.pipelines.Get(r.Context(), id)
+	if err != nil {
+		writeStorageErr(w, err, "pipeline not found")
 		return
 	}
+
 	if body.Name != nil {
-		f.Name = *body.Name
+		p.Name = *body.Name
 	}
 	if len(body.Definition) > 0 {
 		count, _, err := analyzeDefinition(body.Definition)
@@ -221,11 +258,14 @@ func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		f.Definition = body.Definition
-		f.NodeCount = count
+		p.Definition = body.Definition
+		p.NodeCount = count
 	}
-	f.UpdatedAt = time.Now().UTC()
-	s.flows[id] = f
+	p.UpdatedAt = time.Now().UTC()
+	if err := s.pipelines.Update(r.Context(), p); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -253,9 +293,10 @@ func analyzeDefinition(raw json.RawMessage) (int, string, error) {
 
 func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.mu.Lock()
-	delete(s.flows, id)
-	s.mu.Unlock()
+	if err := s.pipelines.Delete(r.Context(), id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -289,12 +330,16 @@ func (s *Server) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pull the originating pipeline ID/name out of the body again so we can
+	// stamp the run record (parseExecuteRequest doesn't expose it).
+	pipelineID, pipelineName := pipelineRefFromBody(rawBody, wf.Name)
+
 	apiKey := r.Header.Get("X-API-Key")
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	execID, err := s.orch.RunAsync(ctx, &orchestrator.RunRequest{
-		RequestMeta: orchestrator.RequestMeta{APIKey: apiKey},
+		RequestMeta: orchestrator.RequestMeta{APIKey: apiKey, WorkflowID: pipelineID},
 		Workflow:    wf,
 		TriggerData: input,
 	})
@@ -303,10 +348,43 @@ func (s *Server) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort run record. A failure here shouldn't block the response —
+	// the orchestrator already accepted the workflow.
+	if s.runs != nil {
+		triggerJSON, _ := json.Marshal(input)
+		if err := s.runs.Insert(r.Context(), &storage.Run{
+			ID:           execID,
+			PipelineID:   pipelineID,
+			PipelineName: pipelineName,
+			Status:       "running",
+			StartedAt:    time.Now().UTC(),
+			TriggerData:  triggerJSON,
+		}); err != nil {
+			slog.WarnContext(r.Context(), "run_insert_failed",
+				slog.String("execution_id", execID),
+				slog.Any("error", err),
+			)
+		}
+	}
+
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"execution_id": execID,
 		"status":       "running",
 	})
+}
+
+// pipelineRefFromBody peeks at the execute request body to recover the
+// pipeline ID + name for the run record. Best-effort; missing fields are OK.
+func pipelineRefFromBody(body []byte, fallbackName string) (id string, name string) {
+	var probe struct {
+		WorkflowID string `json:"workflow_id"`
+		Workflow   struct {
+			Name string `json:"name"`
+		} `json:"workflow"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	name = firstNonEmpty(probe.Workflow.Name, fallbackName)
+	return probe.WorkflowID, name
 }
 
 // handleResumeExecution resolves a Restate Awakeable so a paused workflow
@@ -386,6 +464,35 @@ func (s *Server) handleGetExecution(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+// handleListExecutions returns recent runs from storage. Optional
+// ?pipeline_id= filters by source pipeline; ?limit= caps the page size.
+func (s *Server) handleListExecutions(w http.ResponseWriter, r *http.Request) {
+	if s.runs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("run store not configured"))
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	var (
+		runs []*storage.Run
+		err  error
+	)
+	if pid := r.URL.Query().Get("pipeline_id"); pid != "" {
+		runs, err = s.runs.ListByPipeline(r.Context(), pid, limit)
+	} else {
+		runs, err = s.runs.List(r.Context(), limit)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
 // parseExecuteRequest accepts the structured ExecuteRequest shape:
 //   { "workflow": <n8n-JSON object>, "input": [{...}, ...] }
 //   { "workflow_id": "<id>", "input": [...] }
@@ -406,13 +513,13 @@ func (s *Server) parseExecuteRequest(body []byte) (json.RawMessage, []models.Ite
 	}
 
 	if probe.WorkflowID != "" {
-		s.mu.Lock()
-		f, ok := s.flows[probe.WorkflowID]
-		s.mu.Unlock()
-		if !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p, err := s.pipelines.Get(ctx, probe.WorkflowID)
+		if err != nil {
 			return nil, nil, fmt.Errorf("workflow %q not found", probe.WorkflowID)
 		}
-		return f.Definition, input, nil
+		return p.Definition, input, nil
 	}
 	if len(probe.Workflow) > 0 && string(probe.Workflow) != "null" {
 		return probe.Workflow, input, nil
@@ -432,6 +539,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// writeStorageErr maps storage.ErrNotFound to 404 and other errors to 500.
+// notFoundMsg is the user-facing message on 404.
+func writeStorageErr(w http.ResponseWriter, err error, notFoundMsg string) {
+	if errors.Is(err, storage.ErrNotFound) {
+		writeError(w, http.StatusNotFound, errors.New(notFoundMsg))
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err)
 }
 
 func firstNonEmpty(ss ...string) string {

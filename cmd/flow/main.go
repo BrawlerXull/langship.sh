@@ -17,6 +17,7 @@ import (
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/executors"
 	"github.com/lyzrai/flow/pkg/orchestrator"
+	"github.com/lyzrai/flow/pkg/storage"
 )
 
 func main() {
@@ -51,8 +52,11 @@ usage:
   flow version               print version
 
 env vars (for `+"`flow serve`"+`):
-  FLOW_ADDR                  HTTP listen address (default :8080)
+  FLOW_ADDR                  HTTP listen address (default :8090)
   FLOW_CORS_ORIGINS          comma-separated allow-list (default *)
+  FLOW_PUBLIC_URL            externally-reachable base URL (used for webhook callbacks)
+  MONGO_URI                  Mongo connection string (required)
+  MONGO_DB                   Mongo database name (default flow)
   RESTATE_INGRESS_URL        Restate ingress URL (default http://localhost:8081)
   RESTATE_ADMIN_URL          Restate admin URL (default http://localhost:9070)
   RESTATE_SERVICE_ADDR       Restate service-endpoint listen addr (default :9080)
@@ -94,11 +98,31 @@ func serve() int {
 	executors.RegisterAll()
 	lookup := executors.BuildLookup()
 
-	addr := envOr("FLOW_ADDR", ":8080")
+	addr := envOr("FLOW_ADDR", ":8090")
 	ingressURL := envOr("RESTATE_INGRESS_URL", "http://localhost:8081")
 	adminURL := envOr("RESTATE_ADMIN_URL", "http://localhost:9070")
 	serviceAddr := envOr("RESTATE_SERVICE_ADDR", ":9080")
 	deployURI := envOr("RESTATE_DEPLOYMENT_URI", "http://localhost"+serviceAddr)
+	mongoURI := envOr("MONGO_URI", "")
+	mongoDB := envOr("MONGO_DB", "flow")
+
+	// Mongo is a hard dependency — pipelines/runs/agents all live there.
+	mongoCtx, mongoCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer mongoCancel()
+	mongo, err := storage.NewMongo(mongoCtx, mongoURI, mongoDB)
+	if err != nil {
+		slog.Error("mongo not reachable, exiting",
+			slog.String("hint", "set MONGO_URI (e.g. mongodb://localhost:27017)"),
+			slog.Any("error", err),
+		)
+		return 1
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mongo.Close(closeCtx)
+	}()
+	slog.Info("mongo connected", slog.String("db", mongoDB))
 
 	slog.Info("checking restate",
 		slog.String("ingress", ingressURL),
@@ -140,6 +164,10 @@ func serve() int {
 			Orchestrator:      orch,
 			RestateIngressURL: orch.IngressURL(),
 			CORSOrigins:       parseCSV(envOr("FLOW_CORS_ORIGINS", "*")),
+			PublicURL:         envOr("FLOW_PUBLIC_URL", ""),
+			Pipelines:         mongo.Pipelines(),
+			Runs:              mongo.Runs(),
+			Agents:            mongo.Agents(),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

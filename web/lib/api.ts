@@ -23,6 +23,44 @@ export type ExecutionStatus = {
   [k: string]: unknown;
 };
 
+export type AuthStatus = "untested" | "ok" | "failed";
+
+export type Agent = {
+  id: string;
+  name: string;
+  repoUrl: string;
+  ref?: string;
+  hasPat: boolean;
+  webhookId?: number;
+  webhookUrl?: string;
+  webhookInstalled: boolean;
+  webhookInstalledAt?: string;
+  authStatus?: AuthStatus;
+  authCheckedAt?: string;
+  attachedPipelines?: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Run = {
+  id: string;
+  pipelineId: string;
+  pipelineName?: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  triggerData?: unknown;
+  outputs?: unknown;
+  nodeOutputs?: unknown;
+  errors?: string[];
+};
+
+export type ServerConfig = {
+  publicUrl: string;
+  webhooksAvailable: boolean;
+  orchestratorEnabled: boolean;
+};
+
 const base = ""; // same-origin
 
 async function handle<T>(res: Response): Promise<T> {
@@ -80,4 +118,58 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<{ message: string }>),
+
+  // --- config ---
+  getConfig: () => fetch(`${base}/api/config`).then(handle<ServerConfig>),
+
+  // --- agents ---
+  listAgents: () => fetch(`${base}/api/agents`).then(handle<Agent[]>),
+
+  createAgent: (body: { repoUrl: string; pat?: string; ref?: string; name?: string }) =>
+    fetch(`${base}/api/agents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<Agent>),
+
+  getAgent: (id: string) =>
+    fetch(`${base}/api/agents/${id}`).then(handle<Agent>),
+
+  deleteAgent: (id: string) =>
+    fetch(`${base}/api/agents/${id}`, { method: "DELETE" }).then(handle<void>),
+
+  testAgentAuth: (id: string) =>
+    fetch(`${base}/api/agents/${id}/test-auth`, { method: "POST" }).then(
+      handle<{ authStatus: AuthStatus; authCheckedAt: string; error?: string }>
+    ),
+
+  installAgentWebhook: (id: string) =>
+    fetch(`${base}/api/agents/${id}/webhook`, { method: "POST" }).then(handle<Agent>),
+
+  uninstallAgentWebhook: (id: string) =>
+    fetch(`${base}/api/agents/${id}/webhook`, { method: "DELETE" }).then(handle<Agent>),
+
+  attachPipeline: (id: string, pipelineId: string) =>
+    fetch(`${base}/api/agents/${id}/pipelines/${pipelineId}`, {
+      method: "POST",
+    }).then(handle<Agent>),
+
+  detachPipeline: (id: string, pipelineId: string) =>
+    fetch(`${base}/api/agents/${id}/pipelines/${pipelineId}`, {
+      method: "DELETE",
+    }).then(handle<void>),
+
+  triggerAgent: (id: string) =>
+    fetch(`${base}/api/agents/${id}/trigger`, { method: "POST" }).then(
+      handle<{ executionIds: string[] }>
+    ),
+
+  // --- runs ---
+  listRuns: (params?: { pipelineId?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.pipelineId) qs.set("pipeline_id", params.pipelineId);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const q = qs.toString();
+    return fetch(`${base}/api/executions${q ? `?${q}` : ""}`).then(handle<Run[]>);
+  },
 };

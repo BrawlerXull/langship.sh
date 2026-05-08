@@ -15,9 +15,10 @@ services:
   flow:
     build: .
     ports:
-      - "8080:8080"   # JSON API
+      - "8090:8090"   # JSON API
       - "9080:9080"   # restate callback endpoint
     environment:
+      - FLOW_ADDR=:8090
       - MONGO_URI=mongodb://mongo:27017
       - MONGO_DB=flow
       - FLOW_CORS_ORIGINS=http://localhost:3000,http://web:3000

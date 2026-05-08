@@ -59,3 +59,41 @@ type RunStore interface {
 	ListByPipeline(ctx context.Context, pipelineID string, limit int) ([]*Run, error)
 	List(ctx context.Context, limit int) ([]*Run, error)
 }
+
+// AuthStatus reflects the result of the most recent PAT/repo auth probe.
+type AuthStatus string
+
+const (
+	AuthUntested AuthStatus = "untested"
+	AuthOK       AuthStatus = "ok"
+	AuthFailed   AuthStatus = "failed"
+)
+
+// Agent is an agent repo registered with Langship. The PAT and webhook
+// secret are stored server-side; the API layer scrubs them before the
+// record leaves the boundary (see pkg/api/agents.go).
+type Agent struct {
+	ID                 string     `json:"id"                bson:"_id"`
+	Name               string     `json:"name"              bson:"name"`
+	RepoURL            string     `json:"repoUrl"           bson:"repo_url"`
+	Ref                string     `json:"ref,omitempty"     bson:"ref,omitempty"`
+	PAT                string     `json:"-"                 bson:"pat,omitempty"`
+	WebhookID          int64      `json:"webhookId,omitempty"        bson:"webhook_id,omitempty"`
+	WebhookSecret      string     `json:"-"                          bson:"webhook_secret,omitempty"`
+	WebhookInstalledAt *time.Time `json:"webhookInstalledAt,omitempty" bson:"webhook_installed_at,omitempty"`
+	AuthStatus         AuthStatus `json:"authStatus,omitempty"        bson:"auth_status,omitempty"`
+	AuthCheckedAt      *time.Time `json:"authCheckedAt,omitempty"     bson:"auth_checked_at,omitempty"`
+	AttachedPipelines  []string   `json:"attachedPipelines,omitempty" bson:"attached_pipelines,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"         bson:"created_at"`
+	UpdatedAt          time.Time  `json:"updatedAt"         bson:"updated_at"`
+}
+
+// AgentStore persists agent registrations. Update mutates the entire
+// record; callers do read-modify-write under their own consistency model.
+type AgentStore interface {
+	Create(ctx context.Context, a *Agent) error
+	Get(ctx context.Context, id string) (*Agent, error)
+	Update(ctx context.Context, a *Agent) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context) ([]*Agent, error)
+}

@@ -13,10 +13,27 @@ import (
 
 	"github.com/lyzrai/flow/pkg/models"
 	"github.com/lyzrai/flow/pkg/orchestrator"
+	"github.com/lyzrai/flow/pkg/storage"
 )
 
+// newTestServer returns a Server with in-memory stores wired up. Tests pass
+// extra fields (Orchestrator, RestateIngressURL) that override the defaults.
+func newTestServer(deps ServerDeps) *Server {
+	mem := storage.NewMemory()
+	if deps.Pipelines == nil {
+		deps.Pipelines = mem.Pipelines()
+	}
+	if deps.Runs == nil {
+		deps.Runs = mem.Runs()
+	}
+	if deps.Agents == nil {
+		deps.Agents = mem.Agents()
+	}
+	return NewServer(deps)
+}
+
 func TestHealth_returns200(t *testing.T) {
-	srv := NewServer(ServerDeps{})
+	srv := newTestServer(ServerDeps{})
 	r := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, r)
@@ -34,7 +51,7 @@ func TestHealth_returns200(t *testing.T) {
 }
 
 func TestWorkflowCRUD_roundTrip(t *testing.T) {
-	srv := NewServer(ServerDeps{})
+	srv := newTestServer(ServerDeps{})
 
 	// Create
 	wf := map[string]any{
@@ -132,7 +149,7 @@ func TestWorkflowCRUD_roundTrip(t *testing.T) {
 }
 
 func TestExecute_requiresOrchestrator(t *testing.T) {
-	srv := NewServer(ServerDeps{})
+	srv := newTestServer(ServerDeps{})
 	body, _ := json.Marshal(map[string]any{
 		"workflow": map[string]any{
 			"name":        "x",
@@ -176,7 +193,7 @@ func (s *stubOrch) GetExecution(_ context.Context, _ string) (*orchestrator.Exec
 
 func TestExecute_inlineWorkflow_callsOrchestrator(t *testing.T) {
 	orch := &stubOrch{execID: "exec-123"}
-	srv := NewServer(ServerDeps{Orchestrator: orch})
+	srv := newTestServer(ServerDeps{Orchestrator: orch})
 
 	body := []byte(`{"workflow":{"name":"x","nodes":[{"id":"1","name":"T","type":"n8n-nodes-base.manualTrigger","parameters":{},"position":[0,0]}],"connections":{}},"input":[{"k":"v"}]}`)
 	r := httptest.NewRequest(http.MethodPost, "/api/workflows/execute", bytes.NewReader(body))
@@ -204,7 +221,7 @@ func TestExecute_inlineWorkflow_callsOrchestrator(t *testing.T) {
 
 func TestExecute_byWorkflowID(t *testing.T) {
 	orch := &stubOrch{execID: "exec-7"}
-	srv := NewServer(ServerDeps{Orchestrator: orch})
+	srv := newTestServer(ServerDeps{Orchestrator: orch})
 
 	// Pre-create a workflow.
 	body, _ := json.Marshal(map[string]any{
@@ -234,7 +251,7 @@ func TestExecute_byWorkflowID(t *testing.T) {
 }
 
 func TestExecute_missing_workflow_400(t *testing.T) {
-	srv := NewServer(ServerDeps{Orchestrator: &stubOrch{}})
+	srv := newTestServer(ServerDeps{Orchestrator: &stubOrch{}})
 	body := []byte(`{}`)
 	r := httptest.NewRequest(http.MethodPost, "/api/workflows/execute", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -246,7 +263,7 @@ func TestExecute_missing_workflow_400(t *testing.T) {
 
 func TestGetExecution_returnsOrchStatus(t *testing.T) {
 	want := &orchestrator.ExecutionStatus{ExecutionID: "abc", Status: "success"}
-	srv := NewServer(ServerDeps{Orchestrator: &stubOrch{statusOut: want}})
+	srv := newTestServer(ServerDeps{Orchestrator: &stubOrch{statusOut: want}})
 
 	r := httptest.NewRequest(http.MethodGet, "/api/executions/abc", nil)
 	w := httptest.NewRecorder()
@@ -262,7 +279,7 @@ func TestGetExecution_returnsOrchStatus(t *testing.T) {
 }
 
 func TestGetExecution_notFound(t *testing.T) {
-	srv := NewServer(ServerDeps{Orchestrator: &stubOrch{statusErr: errors.New("nope")}})
+	srv := newTestServer(ServerDeps{Orchestrator: &stubOrch{statusErr: errors.New("nope")}})
 	r := httptest.NewRequest(http.MethodGet, "/api/executions/abc", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, r)
@@ -285,7 +302,7 @@ func TestResume_proxiesToRestate(t *testing.T) {
 	}))
 	defer stub.Close()
 
-	srv := NewServer(ServerDeps{RestateIngressURL: stub.URL})
+	srv := newTestServer(ServerDeps{RestateIngressURL: stub.URL})
 	body, _ := json.Marshal(map[string]any{
 		"awakeable_id": "sign_xyz",
 		"data":         map[string]any{"approved": true},
@@ -309,7 +326,7 @@ func TestResume_proxiesToRestate(t *testing.T) {
 }
 
 func TestResume_requiresAwakeableID(t *testing.T) {
-	srv := NewServer(ServerDeps{RestateIngressURL: "http://localhost"})
+	srv := newTestServer(ServerDeps{RestateIngressURL: "http://localhost"})
 	body, _ := json.Marshal(map[string]any{"awakeable_id": "", "data": map[string]any{}})
 	r := httptest.NewRequest(http.MethodPost, "/api/executions/exec-1/resume", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -320,7 +337,7 @@ func TestResume_requiresAwakeableID(t *testing.T) {
 }
 
 func TestResume_unwiredIngress503(t *testing.T) {
-	srv := NewServer(ServerDeps{}) // no RestateIngressURL
+	srv := newTestServer(ServerDeps{}) // no RestateIngressURL
 	body, _ := json.Marshal(map[string]any{"awakeable_id": "sign_x", "data": map[string]any{}})
 	r := httptest.NewRequest(http.MethodPost, "/api/executions/exec-1/resume", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -332,7 +349,7 @@ func TestResume_unwiredIngress503(t *testing.T) {
 
 func TestNonAPI_returns404(t *testing.T) {
 	// API server no longer hosts the SPA — the UI is a separate process.
-	srv := NewServer(ServerDeps{})
+	srv := newTestServer(ServerDeps{})
 	for _, path := range []string{"/", "/flows/abc", "/runs/123"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
@@ -344,7 +361,7 @@ func TestNonAPI_returns404(t *testing.T) {
 }
 
 func TestUnknownAPIRoute_404(t *testing.T) {
-	srv := NewServer(ServerDeps{})
+	srv := newTestServer(ServerDeps{})
 	r := httptest.NewRequest(http.MethodGet, "/api/does-not-exist", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, r)

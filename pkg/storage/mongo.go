@@ -62,6 +62,9 @@ func (m *Mongo) Pipelines() PipelineStore { return &mongoPipelines{coll: m.db.Co
 // Runs returns the RunStore backed by this Mongo connection.
 func (m *Mongo) Runs() RunStore { return &mongoRuns{coll: m.db.Collection("runs")} }
 
+// Agents returns the AgentStore backed by this Mongo connection.
+func (m *Mongo) Agents() AgentStore { return &mongoAgents{coll: m.db.Collection("agents")} }
+
 func (m *Mongo) ensureIndexes(ctx context.Context) error {
 	if _, err := m.db.Collection("pipelines").Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
@@ -73,6 +76,11 @@ func (m *Mongo) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "started_at", Value: -1}}},
 	}); err != nil {
 		return fmt.Errorf("runs indexes: %w", err)
+	}
+	if _, err := m.db.Collection("agents").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
+	}); err != nil {
+		return fmt.Errorf("agents indexes: %w", err)
 	}
 	return nil
 }
@@ -383,4 +391,59 @@ func bsonToJSON(r bson.Raw) (json.RawMessage, error) {
 		return nil, fmt.Errorf("json marshal: %w", err)
 	}
 	return b, nil
+}
+
+// --- agents ---------------------------------------------------------------
+
+type mongoAgents struct{ coll *mongo.Collection }
+
+func (s *mongoAgents) Create(ctx context.Context, a *Agent) error {
+	_, err := s.coll.InsertOne(ctx, a)
+	return err
+}
+
+func (s *mongoAgents) Update(ctx context.Context, a *Agent) error {
+	res, err := s.coll.ReplaceOne(ctx, bson.M{"_id": a.ID}, a)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoAgents) Get(ctx context.Context, id string) (*Agent, error) {
+	var a Agent
+	if err := s.coll.FindOne(ctx, bson.M{"_id": id}).Decode(&a); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (s *mongoAgents) Delete(ctx context.Context, id string) error {
+	res, err := s.coll.DeleteOne(ctx, bson.M{"_id": id})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoAgents) List(ctx context.Context) ([]*Agent, error) {
+	cur, err := s.coll.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []*Agent
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

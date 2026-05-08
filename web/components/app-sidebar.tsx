@@ -11,6 +11,7 @@ import {
   BookOpen,
   ExternalLink,
   Github,
+  Bot,
 } from "lucide-react";
 
 import {
@@ -56,6 +57,12 @@ const primary: NavItem[] = [
     href: "/executions/view",
     icon: Activity,
     match: (p) => p.startsWith("/executions"),
+  },
+  {
+    title: "Agents",
+    href: "/agents",
+    icon: Bot,
+    match: (p) => p.startsWith("/agents"),
   },
 ];
 

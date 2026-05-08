@@ -2,7 +2,7 @@
 const isProd = process.env.NODE_ENV === "production";
 
 // Where the Go backend is listening during `npm run dev`.
-const apiTarget = process.env.FLOW_API_URL ?? "http://localhost:8080";
+const apiTarget = process.env.FLOW_API_URL ?? "http://localhost:8090";
 
 const nextConfig = {
   // Static export only at build time — the Go binary embeds ./out.

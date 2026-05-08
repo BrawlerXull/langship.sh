@@ -1,10 +1,27 @@
-// Catalog of node types the canvas can drop. Mirrors the executors registered
-// in pkg/executors/registry.go RegisterAll(). Keep this in sync with the Go
-// registry — anything listed here without a matching executor will fail at run
-// time with "executor not implemented for node type".
+// Catalog of node types the canvas can drop. These are the Langship CI/CD
+// pipeline primitives — Trigger → Build → Test → Eval → Policy → Approval
+// → Deploy → Promote → Rollback. The canonical type strings keep the
+// `flow-nodes-base.` prefix so they line up with the executor registry in
+// pkg/executors.
+//
+// Keep this in sync with pkg/executors/registry.go::RegisterAll(). Anything
+// listed here without a matching executor will fail at run time with
+// "executor not implemented for node type".
 
 import type { ComponentType } from "react";
-import { Play, Settings2, Pause, CircleSlash } from "lucide-react";
+import {
+  Play,
+  Hammer,
+  TestTube2,
+  Gauge,
+  ShieldCheck,
+  Pause,
+  Rocket,
+  ArrowUpFromLine,
+  Undo2,
+  CircleSlash,
+  Settings2,
+} from "lucide-react";
 
 export type CatalogEntry = {
   /** Runtime type string: flow-nodes-base.X */
@@ -24,10 +41,9 @@ export type CatalogEntry = {
   /** Default Settings (retry etc.) */
   settings?: Record<string, unknown>;
   /** Group in palette */
-  group: "trigger" | "transform" | "human";
+  group: "trigger" | "build" | "verify" | "gate" | "deploy" | "passthrough";
 };
 
-// Only the executors registered in pkg/executors/registry.go::RegisterAll().
 export const CATALOG: CatalogEntry[] = [
   {
     type: "flow-nodes-base.trigger",
@@ -36,45 +52,146 @@ export const CATALOG: CatalogEntry[] = [
     icon: Play,
     color: "bg-emerald-500",
     outputs: 1,
-    defaults: {},
+    defaults: { mode: "manual" },
     group: "trigger",
+  },
+  {
+    type: "flow-nodes-base.build",
+    label: "Build",
+    description: "Clone the agent repo and run a build command (e.g. docker build).",
+    icon: Hammer,
+    color: "bg-amber-500",
+    outputs: 1,
+    defaults: {
+      command: "docker build -t $AGENT_NAME:$COMMIT_SHA .",
+      workdir: ".",
+      timeoutSeconds: 600,
+    },
+    settings: { retryOnFail: true, maxTries: 2, waitBetweenTries: 5000 },
+    group: "build",
+  },
+  {
+    type: "flow-nodes-base.test",
+    label: "Test",
+    description: "Run unit / integration tests against the build artifact.",
+    icon: TestTube2,
+    color: "bg-sky-500",
+    outputs: 1,
+    defaults: {
+      command: "pytest -q",
+      workdir: ".",
+      timeoutSeconds: 600,
+    },
+    group: "verify",
+  },
+  {
+    type: "flow-nodes-base.eval",
+    label: "Eval",
+    description: "Run agent evals (LLM benchmarks, scoring suites).",
+    icon: Gauge,
+    color: "bg-violet-500",
+    outputs: 1,
+    defaults: {
+      suite: "default",
+      threshold: 0.8,
+      metric: "accuracy",
+    },
+    group: "verify",
+  },
+  {
+    type: "flow-nodes-base.policy",
+    label: "Policy",
+    description: "Apply governance rules (budget, safety, compliance gates).",
+    icon: ShieldCheck,
+    color: "bg-indigo-500",
+    outputs: 1,
+    defaults: {
+      rules: ["max_monthly_spend_usd:1000", "no_pii_in_outputs"],
+      mode: "enforce",
+    },
+    group: "gate",
+  },
+  {
+    type: "flow-nodes-base.waitForApproval",
+    label: "Approval",
+    description: "Pause until a human (or quorum) approves continuation.",
+    icon: Pause,
+    color: "bg-fuchsia-500",
+    outputs: 1,
+    defaults: {
+      reason: "Manual review",
+      reviewers: [],
+    },
+    group: "gate",
+  },
+  {
+    type: "flow-nodes-base.deploy",
+    label: "Deploy",
+    description: "Ship the artifact to a runtime (K8s / Bedrock / Vertex).",
+    icon: Rocket,
+    color: "bg-rose-500",
+    outputs: 1,
+    defaults: {
+      runtime: "kubernetes",
+      env: "dev",
+      target: "",
+    },
+    group: "deploy",
+  },
+  {
+    type: "flow-nodes-base.promote",
+    label: "Promote",
+    description: "Promote a deployed artifact to the next environment.",
+    icon: ArrowUpFromLine,
+    color: "bg-orange-500",
+    outputs: 1,
+    defaults: {
+      fromEnv: "staging",
+      toEnv: "prod",
+    },
+    group: "deploy",
+  },
+  {
+    type: "flow-nodes-base.rollback",
+    label: "Rollback",
+    description: "Revert to a previous deployed revision.",
+    icon: Undo2,
+    color: "bg-red-600",
+    outputs: 1,
+    defaults: {
+      revision: "previous",
+    },
+    group: "deploy",
   },
   {
     type: "flow-nodes-base.set",
     label: "Set",
     description: "Define or transform fields on each item.",
     icon: Settings2,
-    color: "bg-sky-500",
+    color: "bg-slate-500",
     outputs: 1,
     defaults: { values: { string: [] } },
-    group: "transform",
+    group: "passthrough",
   },
   {
     type: "flow-nodes-base.noOp",
     label: "No-op",
-    description: "Pass items through unchanged.",
+    description: "Pass items through unchanged. Useful as a placeholder.",
     icon: CircleSlash,
-    color: "bg-slate-500",
+    color: "bg-slate-400",
     outputs: 1,
     defaults: {},
-    group: "transform",
-  },
-  {
-    type: "flow-nodes-base.waitForApproval",
-    label: "Wait for approval",
-    description: "Pause until a human resolves an awakeable.",
-    icon: Pause,
-    color: "bg-fuchsia-500",
-    outputs: 1,
-    defaults: { reason: "Manual review" },
-    group: "human",
+    group: "passthrough",
   },
 ];
 
 export const GROUP_LABELS: Record<CatalogEntry["group"], string> = {
   trigger: "Trigger",
-  transform: "Transform",
-  human: "Human-in-the-loop",
+  build: "Build",
+  verify: "Verify",
+  gate: "Gate",
+  deploy: "Deploy",
+  passthrough: "Pass-through",
 };
 
 /** Look up by runtime type. Returns undefined for unsupported types so the
@@ -83,7 +200,7 @@ export function lookup(type: string): CatalogEntry | undefined {
   return CATALOG.find((c) => c.type === type);
 }
 
-/** Suggest a unique name like "Set", "Set 2", "Set 3". */
+/** Suggest a unique name like "Build", "Build 2", "Build 3". */
 export function uniqueName(base: string, existing: Set<string>): string {
   if (!existing.has(base)) return base;
   let i = 2;
