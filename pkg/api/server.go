@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/lyzrai/flow/pkg/engine"
+	"github.com/lyzrai/flow/pkg/logstore"
 	"github.com/lyzrai/flow/pkg/models"
 	"github.com/lyzrai/flow/pkg/orchestrator"
 	"github.com/lyzrai/flow/pkg/storage"
@@ -56,6 +57,11 @@ type ServerDeps struct {
 	// per-node lifecycle events to. The SSE handler subscribes per
 	// execution ID. Nil disables /api/executions/{id}/stream.
 	Events EventSubscriber
+
+	// Logs is the archive backend (MinIO/S3). When set, every dispatched
+	// run starts a background archiver that flushes per-node log buffers
+	// to object storage. Nil disables archiving (live SSE still works).
+	Logs logstore.Store
 }
 
 // EventSubscriber is the slice of execevents.MemoryBus the API needs.
@@ -77,6 +83,12 @@ type Server struct {
 	runs      storage.RunStore
 	agents    storage.AgentStore
 	events    EventSubscriber
+	logs      logstore.Store
+
+	// runsBus broadcasts run_created events to every UI tab subscribed to
+	// /api/runs/stream. Used so a webhook-triggered run shows up live in
+	// the dashboard / runs list / agent detail page without polling.
+	runsBus *runsBus
 }
 
 // NewServer constructs an API-only Server. deps.Orchestrator may be nil —
@@ -93,6 +105,8 @@ func NewServer(deps ServerDeps) *Server {
 		runs:          deps.Runs,
 		agents:        deps.Agents,
 		events:        deps.Events,
+		logs:          deps.Logs,
+		runsBus:       newRunsBus(),
 	}
 	s.routes()
 	return s
@@ -119,8 +133,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/workflows/{id}", s.handleDeleteFlow)
 	s.mux.HandleFunc("POST /api/workflows/execute", s.handleExecuteWorkflow)
 	s.mux.HandleFunc("GET /api/executions", s.handleListExecutions)
+	s.mux.HandleFunc("GET /api/runs/stream", s.handleRunsStream)
 	s.mux.HandleFunc("GET /api/executions/{id}", s.handleGetExecution)
 	s.mux.HandleFunc("GET /api/executions/{id}/stream", s.handleStreamExecution)
+	s.mux.HandleFunc("GET /api/executions/{id}/logs/{node}", s.handleNodeLog)
 	s.mux.HandleFunc("POST /api/executions/{id}/resume", s.handleResumeExecution)
 
 	// Agents — Langship-style agent registry (git URL + PAT)
@@ -362,6 +378,21 @@ func (s *Server) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe the log archiver to this execution. Drains node_log events
+	// off the event bus and flushes per-node buffers to MinIO when each
+	// node completes.
+	startLogArchiver(context.Background(), s.logs, s.events, execID)
+
+	// Broadcast so /runs and other tabs flip to live without polling.
+	s.runsBus.Publish(RunCreatedEvent{
+		Type:         "run_created",
+		ExecutionID:  execID,
+		PipelineID:   pipelineID,
+		PipelineName: pipelineName,
+		Source:       "manual",
+		StartedAt:    time.Now().UTC(),
+	})
+
 	// Best-effort run record. A failure here shouldn't block the response —
 	// the orchestrator already accepted the workflow.
 	if s.runs != nil {
@@ -542,6 +573,83 @@ func (s *Server) handleStreamExecution(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+}
+
+// handleRunsStream is a global SSE feed of run_created events. UI tabs
+// subscribe once and react to runs from any source (manual trigger, agent
+// trigger, GitHub push). Heartbeats every 15s.
+func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	ch, cancel := s.runsBus.Subscribe()
+	defer cancel()
+
+	_, _ = fmt.Fprint(w, "event: open\ndata: {}\n\n")
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload, err := ev.marshal()
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+		}
+	}
+}
+
+// handleNodeLog streams the archived log for one node of an execution.
+// Reads through the configured logstore (MinIO/S3 in prod) so the browser
+// never talks to the object store directly. text/plain.
+func (s *Server) handleNodeLog(w http.ResponseWriter, r *http.Request) {
+	if s.logs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("log archive not configured"))
+		return
+	}
+	id := r.PathValue("id")
+	node := r.PathValue("node")
+	if id == "" || node == "" {
+		writeError(w, http.StatusBadRequest, errors.New("execution id and node required"))
+		return
+	}
+	rc, err := s.logs.Get(r.Context(), id, node)
+	if err != nil {
+		if errors.Is(err, logstore.ErrNotFound) {
+			writeError(w, http.StatusNotFound, errors.New("log not found (run may still be in progress)"))
+			return
+		}
+		writeError(w, http.StatusBadGateway, fmt.Errorf("log fetch: %w", err))
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if _, err := io.Copy(w, rc); err != nil {
+		// Connection may have dropped; nothing to do.
+		return
 	}
 }
 

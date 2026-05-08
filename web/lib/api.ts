@@ -171,6 +171,9 @@ export const api = {
   /** Returns the EventSource URL for SSE streaming of an execution. */
   executionStreamURL: (id: string) => `${base}/api/executions/${id}/stream`,
 
+  /** Global runs feed — fires once per dispatched run. */
+  runsStreamURL: () => `${base}/api/runs/stream`,
+
   listRuns: (params?: { pipelineId?: string; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.pipelineId) qs.set("pipeline_id", params.pipelineId);

@@ -12,12 +12,57 @@ services:
       - "8081:8080"   # ingress
       - "9070:9070"   # admin
 
-  # NOTE: this stack reuses the buildkitd + registry from the sibling
-  # `langship` compose project — both already publish on
-  # 127.0.0.1:1234 (BuildKit) and 127.0.0.1:5000 (registry). Bringing them
-  # up here would collide on the same host ports. If you ever run flow
-  # standalone (without that other stack), uncomment the services in
-  # docker-compose.standalone.yml.
+  registry:
+    image: registry:2
+    container_name: langship-flow-registry
+    ports:
+      # Host port 5050 (debug / docker pull from host); inside the compose
+      # network buildkitd pushes to registry:5000 via service DNS.
+      - "127.0.0.1:5050:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+
+  buildkitd:
+    image: moby/buildkit:v0.18.2
+    container_name: langship-flow-buildkitd
+    privileged: true
+    command:
+      - --addr
+      - tcp://0.0.0.0:1234
+      - --addr
+      - unix:///run/buildkit/buildkitd.sock
+      - --config
+      - /etc/buildkit/buildkitd.toml
+    ports:
+      - "127.0.0.1:1234:1234"
+    volumes:
+      - buildkit-data:/var/lib/buildkit
+      - ./docker/buildkit/buildkitd.toml:/etc/buildkit/buildkitd.toml:ro
+    healthcheck:
+      test: ["CMD", "buildctl", "--addr", "tcp://0.0.0.0:1234", "debug", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio:
+    image: minio/minio:latest
+    container_name: langship-flow-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio12345
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   flow:
     build: .
@@ -32,14 +77,18 @@ services:
       - RESTATE_INGRESS_URL=http://restate:8080
       - RESTATE_ADMIN_URL=http://restate:9070
       - RESTATE_DEPLOYMENT_URI=http://flow:9080
-      - BUILDKIT_HOST=tcp://host.docker.internal:1234
+      - BUILDKIT_HOST=tcp://buildkitd:1234
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio12345
+      - MINIO_BUCKET=flow-logs
+      - MINIO_USE_SSL=false
     depends_on:
       - mongo
       - restate
-    # buildkitd + registry are external (the sibling langship stack); see
-    # the note above. Add `external_links: ["langship-buildkitd:buildkitd",
-    # "langship-registry:registry"]` if you run flow as docker-compose and
-    # need network connectivity to those containers.
+      - buildkitd
+      - registry
+      - minio
 
   web:
     build: ./web
@@ -50,3 +99,6 @@ services:
 
 volumes:
   mongo-data:
+  buildkit-data:
+  registry-data:
+  minio-data:

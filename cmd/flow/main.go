@@ -17,6 +17,7 @@ import (
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/execevents"
 	"github.com/lyzrai/flow/pkg/executors"
+	"github.com/lyzrai/flow/pkg/logstore"
 	"github.com/lyzrai/flow/pkg/orchestrator"
 	"github.com/lyzrai/flow/pkg/storage"
 )
@@ -132,6 +133,33 @@ func serve() int {
 	}()
 	slog.Info("mongo connected", slog.String("db", mongoDB))
 
+	// MinIO is optional — when MINIO_ENDPOINT is unset we skip log
+	// archiving. Live SSE log streaming still works regardless.
+	var logs logstore.Store
+	if endpoint := envOr("MINIO_ENDPOINT", ""); endpoint != "" {
+		minioCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		m, err := logstore.NewMinio(minioCtx, logstore.Config{
+			Endpoint:  endpoint,
+			AccessKey: envOr("MINIO_ACCESS_KEY", "minio"),
+			SecretKey: envOr("MINIO_SECRET_KEY", "minio12345"),
+			Bucket:    envOr("MINIO_BUCKET", "flow-logs"),
+			UseSSL:    envOr("MINIO_USE_SSL", "false") == "true",
+		})
+		cancel()
+		if err != nil {
+			slog.Warn("minio init failed, log archive disabled",
+				slog.String("endpoint", endpoint),
+				slog.Any("error", err),
+			)
+		} else {
+			logs = m
+			slog.Info("minio connected",
+				slog.String("endpoint", endpoint),
+				slog.String("bucket", envOr("MINIO_BUCKET", "flow-logs")),
+			)
+		}
+	}
+
 	// Register executors now that storage is ready; the Build executor
 	// reads from AgentStore.
 	executors.RegisterAll(executors.RegistryDeps{
@@ -189,6 +217,7 @@ func serve() int {
 			Runs:              mongo.Runs(),
 			Agents:            mongo.Agents(),
 			Events:            eventBus,
+			Logs:              logs,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

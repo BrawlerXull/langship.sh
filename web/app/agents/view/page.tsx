@@ -88,6 +88,12 @@ function AgentDetail() {
 
   useEffect(() => {
     load();
+    // Reload recent runs whenever any run is dispatched (manual / agent /
+    // GitHub push). Cheap — `load()` is one round-trip.
+    const es = new EventSource(api.runsStreamURL());
+    es.onmessage = () => load();
+    es.onerror = () => {};
+    return () => es.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 

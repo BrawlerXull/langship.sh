@@ -3,10 +3,11 @@ import "./globals.css";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { RunsListener } from "@/components/runs-listener";
 
 export const metadata: Metadata = {
-  title: "flow",
-  description: "Durable n8n-compatible workflow engine",
+  title: "Langship",
+  description: "Durable agent-pipeline runtime",
 };
 
 export default function RootLayout({
@@ -25,6 +26,7 @@ export default function RootLayout({
             <div className="flex min-h-0 flex-1 flex-col">{children}</div>
           </SidebarInset>
         </SidebarProvider>
+        <RunsListener />
       </body>
     </html>
   );

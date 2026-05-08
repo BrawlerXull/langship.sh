@@ -50,26 +50,20 @@ Pre-v0.1. Working but moving fast — APIs and node types may change.
 
 ## Quickstart
 
-The default `docker compose up` brings the **API + UI + backing stores**
-(Mongo, Restate). It assumes you have BuildKit + a registry running on
-the host already (e.g. via the sibling `langship` stack).
-
 ```sh
 docker compose up
 # UI:        http://localhost:3000
 # API:       http://localhost:8090
 # Restate:   :8081 ingress, :9070 admin
+# BuildKit:  127.0.0.1:1234
+# Registry:  127.0.0.1:5050 (host port; buildkitd pushes to registry:5000 internally)
+# MinIO:     127.0.0.1:9000 (S3 API), :9001 (console; minio / minio12345)
 ```
 
-If you **don't** have BuildKit + registry running, layer the standalone
-overlay to bring them up too:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.standalone.yml up
-# adds:
-#   buildkitd  127.0.0.1:1234   (moby/buildkit:v0.18.2)
-#   registry   127.0.0.1:5000   (registry:2)
-```
+The base compose now bundles every service flow needs: **mongo, restate,
+buildkitd, registry, minio, flow, web**. If a sibling stack already owns
+one of those host ports (e.g. another langship-* set), stop that
+container or override the port mapping in a `compose.override.yml`.
 
 ## Dev (hot reload)
 

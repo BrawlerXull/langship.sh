@@ -434,6 +434,28 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 			})
 			continue
 		}
+		// Hook the log archiver onto the new execution so per-node lines
+		// land in MinIO when each node finishes.
+		startLogArchiver(context.Background(), s.logs, s.events, execID)
+
+		// Broadcast so /runs etc. light up without polling. We extract
+		// `source` from the trigger payload (manual / github_push).
+		source := ""
+		if items, ok := trigger.([]map[string]any); ok && len(items) > 0 {
+			if s, _ := items[0]["source"].(string); s != "" {
+				source = s
+			}
+		}
+		s.runsBus.Publish(RunCreatedEvent{
+			Type:         "run_created",
+			ExecutionID:  execID,
+			PipelineID:   pid,
+			PipelineName: p.Name,
+			AgentID:      a.ID,
+			Source:       source,
+			StartedAt:    time.Now().UTC(),
+		})
+
 		if s.runs != nil {
 			_ = s.runs.Insert(ctx, &storage.Run{
 				ID:           execID,

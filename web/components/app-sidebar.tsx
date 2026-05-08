@@ -4,14 +4,18 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Workflow,
-  LayoutGrid,
-  PlusCircle,
-  Activity,
-  BookOpen,
-  ExternalLink,
-  Github,
+  LayoutDashboard,
   Bot,
+  GitBranch,
+  Play,
+  CheckSquare,
+  Layers,
+  Radio,
+  PanelLeft,
+  PanelLeftClose,
+  Sun,
+  MoonStar,
+  Monitor,
 } from "lucide-react";
 
 import {
@@ -19,18 +23,12 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
-  SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { PanelLeftClose, PanelLeft } from "lucide-react";
 
 type NavItem = {
   title: string;
@@ -41,6 +39,12 @@ type NavItem = {
 
 const primary: NavItem[] = [
   {
+    title: "Dashboard",
+    href: "/dashboard",
+    icon: LayoutDashboard,
+    match: (p) => p === "/dashboard",
+  },
+  {
     title: "Agents",
     href: "/agents",
     icon: Bot,
@@ -49,38 +53,32 @@ const primary: NavItem[] = [
   {
     title: "Pipelines",
     href: "/",
-    icon: LayoutGrid,
-    match: (p) => p === "/" || p.startsWith("/flows/view"),
+    icon: GitBranch,
+    match: (p) => p === "/" || p.startsWith("/flows"),
   },
   {
-    title: "New pipeline",
-    href: "/flows/new",
-    icon: PlusCircle,
-    match: (p) => p.startsWith("/flows/new"),
+    title: "Runs",
+    href: "/runs",
+    icon: Play,
+    match: (p) => p === "/runs" || p.startsWith("/executions"),
   },
   {
-    title: "Executions",
-    href: "/executions/view",
-    icon: Activity,
-    match: (p) => p.startsWith("/executions"),
-  },
-];
-
-const docs = [
-  {
-    title: "n8n compatibility",
-    href: "https://github.com/lyzrai/flow#n8n-compatible",
-    external: true,
+    title: "Approvals",
+    href: "/approvals",
+    icon: CheckSquare,
+    match: (p) => p.startsWith("/approvals"),
   },
   {
-    title: "Durability model",
-    href: "https://github.com/lyzrai/flow#durability",
-    external: true,
+    title: "Environments",
+    href: "/environments",
+    icon: Layers,
+    match: (p) => p.startsWith("/environments"),
   },
   {
-    title: "Embed as Go library",
-    href: "https://github.com/lyzrai/flow#embedding",
-    external: true,
+    title: "Gateway",
+    href: "/gateway",
+    icon: Radio,
+    match: (p) => p.startsWith("/gateway"),
   },
 ];
 
@@ -88,20 +86,17 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname() || "/";
 
   return (
-    <Sidebar variant="floating" {...props}>
+    <Sidebar variant="floating" collapsible="icon" {...props}>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/">
                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <Workflow className="size-4" />
+                  <LangshipMark />
                 </div>
                 <div className="flex flex-col gap-0.5 leading-none">
-                  <span className="font-semibold">flow</span>
-                  <span className="text-xs text-muted-foreground">
-                    pre-v0.1 · durable pipelines
-                  </span>
+                  <span className="font-semibold">Langship</span>
                 </div>
               </Link>
             </SidebarMenuButton>
@@ -111,7 +106,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
           <SidebarMenu className="gap-1">
             {primary.map((item) => {
               const Icon = item.icon;
@@ -131,59 +125,38 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             })}
           </SidebarMenu>
         </SidebarGroup>
-
-        <SidebarSeparator />
-
-        <SidebarGroup>
-          <SidebarGroupLabel>
-            <BookOpen className="mr-1 size-3.5" />
-            Reference
-          </SidebarGroupLabel>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton className="font-medium" disabled>
-                Documentation
-              </SidebarMenuButton>
-              <SidebarMenuSub className="ml-0 border-l-0 px-1.5">
-                {docs.map((d) => (
-                  <SidebarMenuSubItem key={d.href}>
-                    <SidebarMenuSubButton asChild>
-                      <a href={d.href} target="_blank" rel="noreferrer">
-                        <span className="truncate">{d.title}</span>
-                        {d.external && (
-                          <ExternalLink className="ml-auto size-3 opacity-60" />
-                        )}
-                      </a>
-                    </SidebarMenuSubButton>
-                  </SidebarMenuSubItem>
-                ))}
-              </SidebarMenuSub>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarGroup>
       </SidebarContent>
 
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild>
-              <a
-                href="https://github.com/lyzrai/flow"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <Github className="size-4" />
-                <span>GitHub</span>
-                <ExternalLink className="ml-auto size-3 opacity-60" />
-              </a>
-            </SidebarMenuButton>
+            <CollapseToggle />
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <CollapseToggle />
+            <ThemeToggle />
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
     </Sidebar>
+  );
+}
+
+function LangshipMark() {
+  // Tiny anchor/route mark — placeholder for the real Langship logo.
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="size-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="6" cy="6" r="2" />
+      <circle cx="18" cy="18" r="2" />
+      <path d="M6 8v6a4 4 0 0 0 4 4h6" />
+    </svg>
   );
 }
 
@@ -196,5 +169,91 @@ function CollapseToggle() {
       <Icon className="size-4" />
       <span>{collapsed ? "Expand" : "Collapse"}</span>
     </SidebarMenuButton>
+  );
+}
+
+// ThemeToggle is a 3-way segmented control (Light / System / Dark) that
+// writes the theme to <html class>. Persists in localStorage. When the
+// sidebar is collapsed to icons, it renders a single button that cycles
+// through the three themes instead.
+function ThemeToggle() {
+  const { state } = useSidebar();
+  const collapsed = state === "collapsed";
+  const [theme, setTheme] = React.useState<"light" | "dark" | "system">("system");
+
+  React.useEffect(() => {
+    const saved =
+      (typeof window !== "undefined" &&
+        (localStorage.getItem("flow-theme") as
+          | "light"
+          | "dark"
+          | "system"
+          | null)) ||
+      "system";
+    setTheme(saved);
+    apply(saved);
+  }, []);
+
+  function apply(t: "light" | "dark" | "system") {
+    const root = document.documentElement;
+    const prefersDark =
+      window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const dark = t === "dark" || (t === "system" && prefersDark);
+    root.classList.toggle("dark", dark);
+    localStorage.setItem("flow-theme", t);
+  }
+
+  function pick(next: "light" | "dark" | "system") {
+    setTheme(next);
+    apply(next);
+  }
+
+  const items: { id: "light" | "system" | "dark"; icon: typeof Sun; label: string }[] = [
+    { id: "light", icon: Sun, label: "Light" },
+    { id: "system", icon: Monitor, label: "System" },
+    { id: "dark", icon: MoonStar, label: "Dark" },
+  ];
+
+  if (collapsed) {
+    const current = items.find((i) => i.id === theme) ?? items[1];
+    const Icon = current.icon;
+    const next = items[(items.findIndex((i) => i.id === theme) + 1) % items.length].id;
+    return (
+      <SidebarMenuButton
+        onClick={() => pick(next)}
+        className="text-muted-foreground"
+        title={`Theme: ${current.label} (click to cycle)`}
+      >
+        <Icon className="size-4" />
+        <span>{current.label}</span>
+      </SidebarMenuButton>
+    );
+  }
+
+  return (
+    <div className="mx-2 mb-1 flex rounded-md border bg-muted/40 p-0.5">
+      {items.map((it) => {
+        const Icon = it.icon;
+        const active = theme === it.id;
+        return (
+          <button
+            key={it.id}
+            type="button"
+            onClick={() => pick(it.id)}
+            aria-pressed={active}
+            className={
+              "flex flex-1 items-center justify-center gap-1 rounded-sm px-2 py-1 text-[11px] transition-colors " +
+              (active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            <Icon className="size-3.5" />
+            <span>{it.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
