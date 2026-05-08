@@ -76,7 +76,11 @@ func (e *BuildExecutor) Execute(ctx context.Context, node models.NodeDef, inputs
 	}
 
 	commitSHA, _ := trigger["commit"].(string)
-	ref := strFirst(strFromAny(trigger["ref"]), a.Ref, "main")
+	// `git clone --branch` wants a bare name like "main"; if a webhook
+	// payload (or older trigger record) carried "refs/heads/main", trim it
+	// so the clone doesn't fail with "Remote branch refs/heads/main not
+	// found in upstream origin".
+	ref := stripRefsHeads(strFirst(strFromAny(trigger["ref"]), a.Ref, "main"))
 
 	cloneDir, cleanup, err := cloneRepo(ctx, a, ref, commitSHA, time.Duration(timeoutSec)*time.Second)
 	if err != nil {
@@ -509,6 +513,18 @@ func oneLineSummary(s string) string {
 		}
 	}
 	return ""
+}
+
+// stripRefsHeads turns "refs/heads/main" into "main"; passes any other
+// shape through unchanged. Tags ("refs/tags/v1") would still need a
+// different clone strategy (--branch works for both branches and tags so
+// we leave those alone).
+func stripRefsHeads(s string) string {
+	const p = "refs/heads/"
+	if strings.HasPrefix(s, p) {
+		return s[len(p):]
+	}
+	return s
 }
 
 func sanitizeEnvValue(s string) string {

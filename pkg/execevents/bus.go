@@ -10,98 +10,143 @@ package execevents
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/lyzrai/flow/pkg/engine"
 )
 
+// retainPerExec is the cap on per-execution event history. We keep the
+// most-recent N events so a subscriber that arrives mid-run can replay
+// what it missed (node_started lifecycle events especially — those fire
+// fast, often before the UI has connected).
+const retainPerExec = 500
+
+// retainAfterDone is how long to hold the buffer for an execution after
+// the terminal `done` event arrives. Late subscribers (e.g. a user who
+// opens the run page right after success) get the full replay.
+const retainAfterDone = 5 * time.Minute
+
 // MemoryBus is a single-process publish/subscribe bus keyed by execution ID.
-// Subscribers receive every event published for their execution until they
-// unsubscribe or the channel buffer fills (slow subscribers are dropped to
-// keep the publisher non-blocking).
+// Subscribers receive every event published for their execution; on
+// subscribe they additionally receive a backlog replay of events emitted
+// before they connected. Bounded retention per exec keeps memory in check.
 type MemoryBus struct {
-	mu          sync.RWMutex
-	subscribers map[string][]*subscription
-	// terminal stores the final event per exec so a subscriber that arrives
-	// late still gets a "done" / "error" event and closes cleanly.
-	terminal map[string]engine.ExecutionEvent
+	mu      sync.RWMutex
+	streams map[string]*execStream
+}
+
+type execStream struct {
+	subs    []*subscription
+	history []engine.ExecutionEvent
+	done    bool
+	doneAt  time.Time
 }
 
 type subscription struct {
-	ch     chan engine.ExecutionEvent
-	closed bool
-	once   sync.Once
+	ch   chan engine.ExecutionEvent
+	once sync.Once
 }
 
-// NewMemoryBus returns a fresh in-memory bus.
+// NewMemoryBus returns a fresh in-memory bus and starts a background
+// sweeper that drops stale streams. The returned bus has no Close — the
+// process owns the lifecycle.
 func NewMemoryBus() *MemoryBus {
-	return &MemoryBus{
-		subscribers: map[string][]*subscription{},
-		terminal:    map[string]engine.ExecutionEvent{},
-	}
+	b := &MemoryBus{streams: map[string]*execStream{}}
+	go b.sweep()
+	return b
 }
 
-// Emit implements engine.Emitter. Non-blocking: if a subscriber's channel is
-// full we drop the event for that subscriber (publisher must not stall).
+// Emit implements engine.Emitter. Non-blocking: if a subscriber's channel
+// is full the event is dropped for that subscriber (publisher must never
+// stall) but stays in the per-exec history so a fresh subscriber can still
+// see it.
 func (b *MemoryBus) Emit(_ context.Context, execID string, e engine.ExecutionEvent) {
 	if execID == "" {
 		return
 	}
 	b.mu.Lock()
-	subs := append([]*subscription(nil), b.subscribers[execID]...)
-	if isTerminal(e.Type) {
-		b.terminal[execID] = e
+	st := b.streams[execID]
+	if st == nil {
+		st = &execStream{}
+		b.streams[execID] = st
 	}
+	// Append + cap.
+	st.history = append(st.history, e)
+	if over := len(st.history) - retainPerExec; over > 0 {
+		st.history = st.history[over:]
+	}
+	if e.Type == engine.EventDone {
+		st.done = true
+		st.doneAt = time.Now()
+	}
+	subs := append([]*subscription(nil), st.subs...)
 	b.mu.Unlock()
 
 	for _, s := range subs {
 		select {
 		case s.ch <- e:
 		default:
-			// drop — slow subscriber
+			// slow subscriber — drop
 		}
 	}
 }
 
-// Subscribe returns a channel that receives every event for execID. The
-// caller must call the returned cancel func when done. If a terminal event
-// was already published before subscribe, it is replayed once so the caller
-// can shut down cleanly.
+// Subscribe registers for events for execID. On subscribe the caller
+// receives every event already retained for this execution (in order),
+// followed by every new event. Returns the channel and a cancel func.
 func (b *MemoryBus) Subscribe(execID string) (<-chan engine.ExecutionEvent, func()) {
-	s := &subscription{ch: make(chan engine.ExecutionEvent, 32)}
+	// Buffer ≥ history cap so the initial replay never drops.
+	s := &subscription{ch: make(chan engine.ExecutionEvent, retainPerExec+32)}
 
 	b.mu.Lock()
-	b.subscribers[execID] = append(b.subscribers[execID], s)
-	term, hadTerm := b.terminal[execID]
+	st := b.streams[execID]
+	if st == nil {
+		st = &execStream{}
+		b.streams[execID] = st
+	}
+	st.subs = append(st.subs, s)
+	// Snapshot history under the lock.
+	backlog := append([]engine.ExecutionEvent(nil), st.history...)
 	b.mu.Unlock()
 
-	if hadTerm {
-		// non-blocking — buffer is fresh
-		s.ch <- term
+	// Replay outside the lock. Buffer is sized so this never blocks.
+	for _, e := range backlog {
+		s.ch <- e
 	}
 
 	cancel := func() {
 		s.once.Do(func() {
 			b.mu.Lock()
-			cur := b.subscribers[execID]
-			out := cur[:0]
-			for _, x := range cur {
-				if x != s {
-					out = append(out, x)
+			st := b.streams[execID]
+			if st != nil {
+				out := st.subs[:0]
+				for _, x := range st.subs {
+					if x != s {
+						out = append(out, x)
+					}
 				}
-			}
-			if len(out) == 0 {
-				delete(b.subscribers, execID)
-			} else {
-				b.subscribers[execID] = out
+				st.subs = out
 			}
 			b.mu.Unlock()
-			s.closed = true
 			close(s.ch)
 		})
 	}
 	return s.ch, cancel
 }
 
-func isTerminal(t engine.EventType) bool {
-	return t == engine.EventDone
+// sweep periodically GC's streams that are done + past the retention
+// window AND have no live subscribers.
+func (b *MemoryBus) sweep() {
+	t := time.NewTicker(1 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		now := time.Now()
+		b.mu.Lock()
+		for id, st := range b.streams {
+			if st.done && len(st.subs) == 0 && now.Sub(st.doneAt) > retainAfterDone {
+				delete(b.streams, id)
+			}
+		}
+		b.mu.Unlock()
+	}
 }

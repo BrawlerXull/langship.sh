@@ -538,13 +538,19 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize the ref to the bare branch name (`main`, not `refs/heads/main`)
+	// so downstream nodes — particularly Build's git clone --branch — don't
+	// have to know about Git's internal ref namespace. `fullRef` is kept for
+	// nodes that want the original.
+	branch := github.BranchFromRef(push.Ref)
 	trigger := []map[string]any{{
 		"source":    "github_push",
 		"agentId":   a.ID,
 		"agentName": a.Name,
 		"repoUrl":   a.RepoURL,
-		"ref":       push.Ref,
-		"branch":    github.BranchFromRef(push.Ref),
+		"ref":       branch,
+		"branch":    branch,
+		"fullRef":   push.Ref,
 		"commit":    push.After,
 		"pusher":    push.Pusher.Name,
 	}}

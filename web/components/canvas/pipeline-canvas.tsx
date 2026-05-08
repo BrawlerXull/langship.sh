@@ -70,6 +70,8 @@ function CanvasInner({
   fullBleed,
   nodeStatuses,
 }: PipelineCanvasProps) {
+  // (Hook order: nodes/edges state declared below so this comment sits at
+  // the top of the component for context.)
   // Compute initial RF state once. The canvas owns it from here on.
   const initial = useMemo(() => toReactFlow(initialValue ?? null), []);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: load-once
@@ -77,6 +79,28 @@ function CanvasInner({
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Merge external runStatus into the RF-owned node state. We can't just
+  // pass a freshly-mapped `nodes` prop to <ReactFlow> because useNodesState
+  // makes RF the source of truth — external props get overridden by the
+  // internal store on the next render. Instead we patch the store directly
+  // whenever nodeStatuses changes. Skips updates when the value is
+  // unchanged so we don't churn React Flow on every poll tick.
+  useEffect(() => {
+    if (!nodeStatuses) return;
+    setNodes((cur) =>
+      cur.map((n) => {
+        const next = nodeStatuses[n.id] ?? "pending";
+        const prev =
+          (n.data as FlowNodeData & { runStatus?: string }).runStatus ?? "pending";
+        if (prev === next) return n;
+        return {
+          ...n,
+          data: { ...(n.data as FlowNodeData), runStatus: next },
+        };
+      })
+    );
+  }, [nodeStatuses, setNodes]);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { screenToFlowPosition } = useReactFlow();
@@ -233,17 +257,7 @@ function CanvasInner({
         onDrop={onDrop}
       >
         <ReactFlow
-          nodes={
-            nodeStatuses
-              ? nodes.map((n) => ({
-                  ...n,
-                  data: {
-                    ...n.data,
-                    runStatus: nodeStatuses[n.id] ?? "pending",
-                  },
-                }))
-              : nodes
-          }
+          nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}

@@ -27,6 +27,14 @@ import (
 	"github.com/lyzrai/flow/pkg/storage"
 )
 
+// ssePrimer is a >2 KB SSE comment block sent as the first chunk of every
+// stream response. Buffer-aware proxies (Cloudflare quick-tunnels, some CDN
+// edges, http/2 windowing on slow links) hold back small chunks until they
+// reach a flush threshold. Padding past that threshold makes node-by-node
+// events arrive immediately instead of in one burst at the end of the run.
+// Lines beginning with `:` are SSE comments — clients ignore them silently.
+var ssePrimer = ":" + strings.Repeat(" ", 2049) + "\n\n"
+
 // FlowSummary is the list-shape returned to the dashboard.
 type FlowSummary struct {
 	ID          string    `json:"id"`
@@ -133,10 +141,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/workflows/{id}", s.handleDeleteFlow)
 	s.mux.HandleFunc("POST /api/workflows/execute", s.handleExecuteWorkflow)
 	s.mux.HandleFunc("GET /api/executions", s.handleListExecutions)
+	// Stream routes register both with-and-without trailing slash so the
+	// Next dev server's `trailingSlash: true` rewrite (which appends "/")
+	// reaches the same handler as a direct call. Without this the SSE
+	// stream returns the literal redirect text via the Next proxy and the
+	// UI never sees node_started/log events.
 	s.mux.HandleFunc("GET /api/runs/stream", s.handleRunsStream)
+	s.mux.HandleFunc("GET /api/runs/stream/", s.handleRunsStream)
 	s.mux.HandleFunc("GET /api/executions/{id}", s.handleGetExecution)
 	s.mux.HandleFunc("GET /api/executions/{id}/stream", s.handleStreamExecution)
+	s.mux.HandleFunc("GET /api/executions/{id}/stream/", s.handleStreamExecution)
 	s.mux.HandleFunc("GET /api/executions/{id}/logs/{node}", s.handleNodeLog)
+	s.mux.HandleFunc("GET /api/executions/{id}/logs/{node}/", s.handleNodeLog)
 	s.mux.HandleFunc("POST /api/executions/{id}/resume", s.handleResumeExecution)
 
 	// Agents — Langship-style agent registry (git URL + PAT)
@@ -535,16 +551,19 @@ func (s *Server) handleStreamExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 	w.WriteHeader(http.StatusOK)
 
 	ch, cancel := s.events.Subscribe(id)
 	defer cancel()
 
-	// Tell the client which execution it's subscribed to (also primes the
-	// SSE pipe so flushers in the middle don't withhold the first byte).
+	// Prime the stream with a >2 KB comment so intermediate proxies that
+	// buffer based on byte threshold (Cloudflare quick-tunnel, some CDN
+	// edges) flush past the threshold immediately. SSE comments start with
+	// `:` and are ignored by EventSource.
+	_, _ = fmt.Fprint(w, ssePrimer)
 	_, _ = fmt.Fprintf(w, "event: open\ndata: {\"execution_id\":%q}\n\n", id)
 	flusher.Flush()
 
@@ -586,7 +605,7 @@ func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
@@ -594,6 +613,8 @@ func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := s.runsBus.Subscribe()
 	defer cancel()
 
+	// See handleStreamExecution for why this padding is required.
+	_, _ = fmt.Fprint(w, ssePrimer)
 	_, _ = fmt.Fprint(w, "event: open\ndata: {}\n\n")
 	flusher.Flush()
 

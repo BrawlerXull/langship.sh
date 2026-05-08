@@ -75,6 +75,12 @@ function ExecutionView() {
   const [run, setRun] = useState<Run | null>(null);
   const [pipelineDef, setPipelineDef] = useState<PipelineDefinition | null>(null);
   const [nodeStatuses, setNodeStatuses] = useState<NodeStatuses>({});
+  // Per-node tick when we first marked it running. Used to enforce a
+  // minimum visible "running" duration so the user always sees the
+  // spinner — even for instantaneous nodes (Trigger, NoOp). Without
+  // this, fast nodes flicker pending → success in one render batch and
+  // the running state is invisible.
+  const runningSinceRef = useRef<Record<string, number>>({});
   const [nodeLogs, setNodeLogs] = useState<NodeLogs>({});
   const [nodeDurations, setNodeDurations] = useState<NodeDurations>({});
   const [streamConnected, setStreamConnected] = useState(false);
@@ -130,22 +136,39 @@ function ExecutionView() {
           return;
         }
         if (ev.node) {
-          setNodeStatuses((prev) => {
-            const next: NodeStatus =
-              ev.type === "node_started"
-                ? "running"
-                : ev.type === "node_completed"
-                  ? "success"
-                  : ev.type === "node_error"
-                    ? "failed"
-                    : (prev[ev.node!] ?? "pending");
-            return { ...prev, [ev.node!]: next };
-          });
-          if (ev.type === "node_completed" || ev.type === "node_error") {
+          const node = ev.node;
+          const minVisibleMs = 400;
+
+          if (ev.type === "node_started") {
+            runningSinceRef.current[node] = Date.now();
+            setNodeStatuses((prev) => ({ ...prev, [node]: "running" }));
+          } else if (ev.type === "node_completed" || ev.type === "node_error") {
+            const final: NodeStatus =
+              ev.type === "node_completed" ? "success" : "failed";
+            const startedAt = runningSinceRef.current[node];
+            const elapsed = startedAt ? Date.now() - startedAt : Infinity;
+
+            // Make sure the user actually sees a "running" frame. If we
+            // never recorded a start (subscriber arrived after the start
+            // event flushed) we apply the terminal state immediately.
+            if (startedAt === undefined || elapsed >= minVisibleMs) {
+              setNodeStatuses((prev) => ({ ...prev, [node]: final }));
+            } else {
+              // Briefly show "running" first if we missed it, then flip.
+              setNodeStatuses((prev) => ({
+                ...prev,
+                [node]: prev[node] === "running" ? "running" : "running",
+              }));
+              setTimeout(() => {
+                setNodeStatuses((prev) => ({ ...prev, [node]: final }));
+              }, minVisibleMs - elapsed);
+            }
+            delete runningSinceRef.current[node];
+
             if (typeof ev.duration_ms === "number") {
               setNodeDurations((prev) => ({
                 ...prev,
-                [ev.node!]: ev.duration_ms!,
+                [node]: ev.duration_ms!,
               }));
             }
           }

@@ -61,7 +61,24 @@ export type ServerConfig = {
   orchestratorEnabled: boolean;
 };
 
-const base = ""; // same-origin
+// REST + page calls go same-origin (Next rewrite proxies /api → Go in dev,
+// nginx proxies /api → flow:8090 in prod).
+const base = "";
+
+// SSE base for streaming endpoints.
+//
+// Default: same-origin (works behind any reverse proxy that doesn't buffer
+// — nginx with `proxy_buffering off`, our prod config; Cloudflare tunnels;
+// most production setups).
+//
+// Dev override: set NEXT_PUBLIC_FLOW_API_URL=http://localhost:8090 to hit
+// the Go server directly, bypassing Next's dev rewrite (which buffers
+// chunked responses, breaking node-by-node updates) and Next's 308 redirect
+// from `trailingSlash: true` (which EventSource won't follow).
+const sseBase =
+  (typeof process !== "undefined" &&
+    process.env?.NEXT_PUBLIC_FLOW_API_URL) ||
+  "";
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -168,11 +185,16 @@ export const api = {
     ),
 
   // --- runs ---
-  /** Returns the EventSource URL for SSE streaming of an execution. */
-  executionStreamURL: (id: string) => `${base}/api/executions/${id}/stream`,
+  /** Returns the EventSource URL for SSE streaming of an execution.
+   *  Uses `sseBase` so dev can hit the Go API directly (skipping Next's
+   *  trailingSlash 308 which EventSource won't follow). Trailing slash on
+   *  the path keeps things consistent if the user does proxy through Next
+   *  or nginx; the Go mux registers both forms either way. */
+  executionStreamURL: (id: string) => `${sseBase}/api/executions/${id}/stream/`,
 
-  /** Global runs feed — fires once per dispatched run. */
-  runsStreamURL: () => `${base}/api/runs/stream`,
+  /** Global runs feed — fires once per dispatched run. Same dev-bypass
+   *  reasoning as executionStreamURL. */
+  runsStreamURL: () => `${sseBase}/api/runs/stream/`,
 
   listRuns: (params?: { pipelineId?: string; limit?: number }) => {
     const qs = new URLSearchParams();

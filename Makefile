@@ -33,7 +33,12 @@ web:
 	cd web && (test -d node_modules || npm install --no-fund --no-audit --loglevel=error) && npm run build
 
 web-dev:
-	cd web && (test -d node_modules || npm install --no-fund --no-audit --loglevel=error) && npm run dev
+	# NEXT_PUBLIC_FLOW_API_URL points the SSE EventSource straight at the
+	# Go API so streams skip Next's trailingSlash 308 redirect (which
+	# EventSource doesn't follow). Override at the command line if your
+	# Go API runs elsewhere.
+	cd web && (test -d node_modules || npm install --no-fund --no-audit --loglevel=error) \
+	  && NEXT_PUBLIC_FLOW_API_URL=$${NEXT_PUBLIC_FLOW_API_URL:-http://localhost:8090} npm run dev
 
 # `make dev` runs the Next.js dev server (auto-installs deps).
 # In another terminal run `make watch` to hot-reload the Go API on :8090;
