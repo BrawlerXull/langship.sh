@@ -5,43 +5,75 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/lyzrai/flow/pkg/engine"
 	"github.com/lyzrai/flow/pkg/models"
 )
 
-// PushExecutor copies an OCI image from one registry to another. Source
-// defaults to the local registry image produced by an upstream Build node
-// (read from inputs[0][0].__build.image) but can be overridden by the
-// srcImage parameter. Destination is constructed from targetRegistry +
-// targetImage + tag. Optional username/password authenticate the push.
+// PushExecutor copies an OCI image from one registry to one or more
+// destinations in parallel. Each target is an independent network op with
+// its own registry/image/tag/auth — so mirroring to N clouds takes
+// max(targetN), not sum(targetN).
 //
-// Implementation uses go-containerregistry's crane.Copy — same primitive
-// the `crane` CLI / ko / skopeo-Go-callers use. No docker daemon required;
-// works against any OCI v2 registry. The local registry (registry:5000) is
-// reached via plain HTTP because we mark it insecure when constructing the
-// reference.
+// Source defaults to the upstream Build node's `__build.image` (read off
+// inputs[0][0].__build.image) and can be overridden by srcImage. The local
+// registry is HTTP, so srcInsecure defaults to true.
 //
-// Parameters:
-//   - srcImage         string  override source image ref (optional)
-//   - targetRegistry   string  e.g. "ghcr.io"
-//   - targetImage      string  e.g. "org/agent"
-//   - tag              string  defaults to upstream __build.commit then "latest"
-//   - username         string  optional
-//   - password         string  optional
-//   - srcInsecure      bool    treat src registry as plain HTTP (default true; the local one is)
-//   - dstInsecure      bool    treat dst registry as plain HTTP (default false)
+// Targets shape (parameters.targets is a JSON array):
+//
+//	[
+//	  {
+//	    "name": "ghcr",
+//	    "registry": "ghcr.io",
+//	    "image": "org/agent",
+//	    "tag": "v1.2.3",          # optional; defaults to upstream commit SHA, then "latest"
+//	    "username": "owner",
+//	    "password": "ghp_…",
+//	    "insecure": false
+//	  },
+//	  { "name": "mirror", "registry": "registry.local:5000", "image": "org/agent", "insecure": true }
+//	]
+//
+// Backward compat: if `targets` is empty/missing, the legacy single-target
+// fields (targetRegistry / targetImage / tag / username / password /
+// dstInsecure) are read.
+//
+// Implementation uses go-containerregistry — same primitive `crane` CLI /
+// ko / skopeo-Go-callers use. No docker daemon required.
 type PushExecutor struct{}
+
+// pushTarget is the parsed shape of one entry in parameters.targets[].
+type pushTarget struct {
+	Name     string
+	Registry string
+	Image    string
+	Tag      string
+	Username string
+	Password string
+	Insecure bool
+}
+
+// pushCopy is what we record per target for the run's output items.
+type pushCopy struct {
+	Name       string `json:"name,omitempty"`
+	Registry   string `json:"registry"`
+	ImageRef   string `json:"imageRef"`
+	Digest     string `json:"digest,omitempty"`
+	DurationMS int64  `json:"durationMs"`
+	Error      string `json:"error,omitempty"`
+}
 
 func (e *PushExecutor) Execute(ctx context.Context, node models.NodeDef, inputs [][]models.Item, _ *engine.ExecutionContext) (map[int][]models.Item, error) {
 	logger := engine.NodeLoggerFromContext(ctx)
 
-	// Source: explicit param wins, otherwise upstream __build.image.
+	// --- source ---
 	srcImage := strParam(node.Parameters, "srcImage", "")
 	if srcImage == "" {
 		srcImage = imageFromBuildOutput(inputs)
@@ -49,104 +81,254 @@ func (e *PushExecutor) Execute(ctx context.Context, node models.NodeDef, inputs 
 	if srcImage == "" {
 		return nil, errors.New("push: no source image (set srcImage or wire a Build node upstream)")
 	}
-
-	// Destination.
-	dstRegistry := strings.TrimRight(strings.TrimSpace(strParam(node.Parameters, "targetRegistry", "")), "/")
-	dstImage := strings.TrimSpace(strParam(node.Parameters, "targetImage", ""))
-	if dstRegistry == "" || dstImage == "" {
-		return nil, errors.New("push: targetRegistry and targetImage are required")
-	}
-	tag := strings.TrimSpace(strParam(node.Parameters, "tag", ""))
-	if tag == "" {
-		tag = strFirst(commitFromBuildOutput(inputs), "latest")
-	}
-	dstRef := fmt.Sprintf("%s/%s:%s", dstRegistry, dstImage, tag)
-
-	username := strParam(node.Parameters, "username", "")
-	password := strParam(node.Parameters, "password", "")
-
-	srcInsecure := boolParam(node.Parameters, "srcInsecure", true)
-	dstInsecure := boolParam(node.Parameters, "dstInsecure", false)
-
-	logger.Log(fmt.Sprintf("copying %s -> %s", srcImage, dstRef))
-
-	// Build the crane options. We layer:
-	//   - context (for cancellation)
-	//   - per-side insecure flag (lets us read from local registry:5000 over HTTP)
-	//   - keychain for auth (only used by the destination side; explicit
-	//     username/password takes precedence via WithAuth)
-	srcOpts := []crane.Option{crane.WithContext(ctx)}
-	dstOpts := []crane.Option{crane.WithContext(ctx)}
-	if srcInsecure {
-		srcOpts = append(srcOpts, crane.Insecure)
-	}
-	if dstInsecure {
-		dstOpts = append(dstOpts, crane.Insecure)
-	}
-	if username != "" || password != "" {
-		dstOpts = append(dstOpts, crane.WithAuth(&authn.Basic{
-			Username: username,
-			Password: password,
-		}))
-	} else {
-		// Falls back to docker config / GHCR anonymous / etc.
-		dstOpts = append(dstOpts, crane.WithAuthFromKeychain(authn.DefaultKeychain))
-	}
-
-	// Validate refs early so we surface a clear error.
 	if _, err := name.ParseReference(srcImage); err != nil {
 		return nil, fmt.Errorf("push: invalid src %q: %w", srcImage, err)
 	}
-	if _, err := name.ParseReference(dstRef); err != nil {
-		return nil, fmt.Errorf("push: invalid dst %q: %w", dstRef, err)
+	srcInsecure := boolParam(node.Parameters, "srcInsecure", true)
+
+	// --- targets ---
+	targets := parseTargets(node.Parameters, inputs)
+	if len(targets) == 0 {
+		return nil, errors.New("push: no targets configured (set targets[] or targetRegistry/targetImage)")
 	}
 
-	// crane.Copy doesn't accept per-side options — we emulate by pulling
-	// the image with src options and pushing it with dst options.
+	logger.Log(fmt.Sprintf("[push] source %s, %d target(s)", srcImage, len(targets)))
+
+	// --- pull source once ---
+	srcOpts := []crane.Option{crane.WithContext(ctx)}
+	if srcInsecure {
+		srcOpts = append(srcOpts, crane.Insecure)
+	}
 	logger.Log("pulling source manifest…")
 	img, err := crane.Pull(srcImage, srcOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("push: pull %s: %w", srcImage, err)
 	}
 
-	logger.Log("pushing to destination…")
-	started := time.Now()
-	if err := crane.Push(img, dstRef, dstOpts...); err != nil {
-		return nil, fmt.Errorf("push: push %s: %w", dstRef, err)
+	// --- fan out pushes ---
+	results := make([]pushCopy, len(targets))
+	var wg sync.WaitGroup
+	wg.Add(len(targets))
+	for i, t := range targets {
+		go func(i int, t pushTarget) {
+			defer wg.Done()
+			results[i] = pushOne(ctx, img, t, logger)
+		}(i, t)
 	}
-	logger.Log(fmt.Sprintf("done in %s", time.Since(started).Round(100*time.Millisecond)))
+	wg.Wait()
 
-	digest, derr := img.Digest()
-	digestStr := ""
-	if derr == nil {
-		digestStr = digest.String()
+	// --- summarize ---
+	succeeded := 0
+	for _, r := range results {
+		if r.Error == "" {
+			succeeded++
+		}
+	}
+	logger.Log(fmt.Sprintf("[push] done: %d/%d target(s) succeeded", succeeded, len(results)))
+
+	// Convert to JSON-friendly maps for the output items.
+	copiesAny := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		copiesAny = append(copiesAny, map[string]any{
+			"name":       r.Name,
+			"registry":   r.Registry,
+			"imageRef":   r.ImageRef,
+			"digest":     r.Digest,
+			"durationMs": r.DurationMS,
+			"error":      r.Error,
+		})
+	}
+	summary := map[string]any{
+		"src":         srcImage,
+		"copies":      copiesAny,
+		"finished_at": time.Now().UTC(),
+	}
+	// Convenience top-level fields when there's only one target — keeps
+	// the old `__push.dst / digest` shape working for downstream tooling.
+	if len(results) == 1 {
+		summary["dst"] = results[0].ImageRef
+		summary["digest"] = results[0].Digest
 	}
 
-	// Pass-through items + a __push summary so downstream nodes can read it.
 	out := make([]models.Item, 0)
 	for _, in := range inputs {
 		for _, item := range in {
 			ci := copyItem(item)
-			ci["__push"] = map[string]any{
-				"src":         srcImage,
-				"dst":         dstRef,
-				"digest":      digestStr,
-				"finished_at": time.Now().UTC(),
-			}
+			ci["__push"] = summary
 			out = append(out, ci)
 		}
 	}
 	if len(out) == 0 {
-		out = append(out, models.Item{
-			"__push": map[string]any{
-				"src":         srcImage,
-				"dst":         dstRef,
-				"digest":      digestStr,
-				"finished_at": time.Now().UTC(),
-			},
-		})
+		out = append(out, models.Item{"__push": summary})
+	}
+
+	if succeeded != len(results) {
+		// Surface the first error so the run shows a meaningful failure
+		// message; the rest are still in __push.copies.
+		for _, r := range results {
+			if r.Error != "" {
+				return nil, fmt.Errorf("push to %s failed: %s", r.ImageRef, r.Error)
+			}
+		}
 	}
 	return map[int][]models.Item{0: out}, nil
+}
+
+// pushOne pushes a previously-pulled image to one target.
+func pushOne(ctx context.Context, img v1.Image, t pushTarget, logger engine.NodeLogger) pushCopy {
+	started := time.Now()
+	dst := fmt.Sprintf("%s/%s:%s", strings.TrimRight(t.Registry, "/"), t.Image, t.Tag)
+	tag := t.tagPrefix()
+
+	logger.Log(fmt.Sprintf("%s copying → %s", tag, dst))
+
+	if _, err := name.ParseReference(dst); err != nil {
+		logger.Log(fmt.Sprintf("%s ✗ invalid ref: %v", tag, err))
+		return pushCopy{
+			Name: t.Name, Registry: t.Registry, ImageRef: dst,
+			DurationMS: time.Since(started).Milliseconds(),
+			Error:      fmt.Sprintf("invalid ref: %v", err),
+		}
+	}
+
+	dstOpts := []crane.Option{crane.WithContext(ctx)}
+	if t.Insecure {
+		dstOpts = append(dstOpts, crane.Insecure)
+	}
+	if t.Username != "" || t.Password != "" {
+		dstOpts = append(dstOpts, crane.WithAuth(&authn.Basic{
+			Username: t.Username,
+			Password: t.Password,
+		}))
+	} else {
+		dstOpts = append(dstOpts, crane.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
+	if err := crane.Push(img, dst, dstOpts...); err != nil {
+		logger.Log(fmt.Sprintf("%s ✗ %v", tag, err))
+		return pushCopy{
+			Name: t.Name, Registry: t.Registry, ImageRef: dst,
+			DurationMS: time.Since(started).Milliseconds(),
+			Error:      err.Error(),
+		}
+	}
+	digestStr := ""
+	if d, derr := img.Digest(); derr == nil {
+		digestStr = d.String()
+	}
+	dur := time.Since(started)
+	logger.Log(fmt.Sprintf("%s ✓ %s (%s)", tag, dst, dur.Round(100*time.Millisecond)))
+	return pushCopy{
+		Name: t.Name, Registry: t.Registry, ImageRef: dst,
+		Digest: digestStr, DurationMS: dur.Milliseconds(),
+	}
+}
+
+// tagPrefix is the per-target log line prefix. Mirrors the Node version's
+// "[push:name]" so a multi-target log is greppable.
+func (t pushTarget) tagPrefix() string {
+	if t.Name != "" {
+		return "[push:" + t.Name + "]"
+	}
+	return "[push:" + t.Registry + "]"
+}
+
+// parseTargets unifies the new `targets[]` shape with the old single-target
+// fields. Returns nothing if neither is set (caller treats as error).
+//
+// Tag default order:  target.tag → upstream __build.commit → "latest".
+func parseTargets(p map[string]any, inputs [][]models.Item) []pushTarget {
+	commit := commitFromBuildOutput(inputs)
+
+	defaultTag := func(explicit string) string {
+		t := strings.TrimSpace(explicit)
+		if t != "" {
+			return t
+		}
+		if commit != "" {
+			return commit
+		}
+		return "latest"
+	}
+
+	if raw, ok := p["targets"]; ok {
+		if arr, ok := raw.([]any); ok && len(arr) > 0 {
+			out := make([]pushTarget, 0, len(arr))
+			for i, e := range arr {
+				m, ok := e.(map[string]any)
+				if !ok {
+					continue
+				}
+				reg := strings.TrimSpace(strFromAny(m["registry"]))
+				img := strings.TrimSpace(strFromAny(m["image"]))
+				if reg == "" || img == "" {
+					continue
+				}
+				out = append(out, pushTarget{
+					Name:     defaultName(strFromAny(m["name"]), reg, i),
+					Registry: reg,
+					Image:    img,
+					Tag:      defaultTag(strFromAny(m["tag"])),
+					Username: strFromAny(m["username"]),
+					Password: strFromAny(m["password"]),
+					Insecure: anyToBool(m["insecure"], false),
+				})
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+
+	// Legacy single-target fields.
+	reg := strings.TrimSpace(strParam(p, "targetRegistry", ""))
+	img := strings.TrimSpace(strParam(p, "targetImage", ""))
+	if reg == "" || img == "" {
+		return nil
+	}
+	return []pushTarget{{
+		Name:     defaultName("", reg, 0),
+		Registry: reg,
+		Image:    img,
+		Tag:      defaultTag(strParam(p, "tag", "")),
+		Username: strParam(p, "username", ""),
+		Password: strParam(p, "password", ""),
+		Insecure: boolParam(p, "dstInsecure", false),
+	}}
+}
+
+func defaultName(explicit, registry string, idx int) string {
+	s := strings.TrimSpace(explicit)
+	if s != "" {
+		return s
+	}
+	// First label of the registry hostname is usually a clear ID.
+	host := registry
+	if i := strings.Index(host, "."); i > 0 {
+		host = host[:i]
+	}
+	if host == "" {
+		return fmt.Sprintf("target-%d", idx+1)
+	}
+	return host
+}
+
+func anyToBool(v any, def bool) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		s := strings.ToLower(strings.TrimSpace(x))
+		if s == "true" || s == "1" || s == "yes" {
+			return true
+		}
+		if s == "false" || s == "0" || s == "no" {
+			return false
+		}
+	case float64:
+		return x != 0
+	}
+	return def
 }
 
 // imageFromBuildOutput walks input items for an upstream Build node's
@@ -185,19 +367,6 @@ func boolParam(p map[string]any, key string, def bool) bool {
 	if p == nil {
 		return def
 	}
-	switch v := p[key].(type) {
-	case bool:
-		return v
-	case string:
-		s := strings.ToLower(strings.TrimSpace(v))
-		if s == "true" || s == "1" || s == "yes" {
-			return true
-		}
-		if s == "false" || s == "0" || s == "no" {
-			return false
-		}
-	case float64:
-		return v != 0
-	}
-	return def
+	return anyToBool(p[key], def)
 }
+

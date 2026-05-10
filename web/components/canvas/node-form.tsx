@@ -483,15 +483,38 @@ function ApprovalForm({ node, onChange }: NodeFormProps) {
   );
 }
 
+type PushTarget = {
+  name?: string;
+  registry?: string;
+  image?: string;
+  tag?: string;
+  username?: string;
+  password?: string;
+  insecure?: boolean;
+};
+
 function PushForm({ node, onChange }: NodeFormProps) {
   const srcImage = getString(node, "srcImage", "");
-  const targetRegistry = getString(node, "targetRegistry", "ghcr.io");
-  const targetImage = getString(node, "targetImage", "");
-  const tag = getString(node, "tag", "");
-  const username = getString(node, "username", "");
-  const password = getString(node, "password", "");
   const srcInsecure = getBool(node, "srcInsecure", true);
-  const dstInsecure = getBool(node, "dstInsecure", false);
+  const rawTargets = (node.parameters?.targets as unknown) as PushTarget[] | undefined;
+  const targets: PushTarget[] = Array.isArray(rawTargets) ? rawTargets : [];
+
+  function setTargets(next: PushTarget[]) {
+    onChange(setParam(node, "targets", next as unknown as Record<string, unknown>[]));
+  }
+  function patch(idx: number, patch: Partial<PushTarget>) {
+    setTargets(targets.map((t, i) => (i === idx ? { ...t, ...patch } : t)));
+  }
+  function addTarget() {
+    setTargets([
+      ...targets,
+      { name: `target-${targets.length + 1}`, registry: "", image: "" },
+    ]);
+  }
+  function removeTarget(idx: number) {
+    setTargets(targets.filter((_, i) => i !== idx));
+  }
+
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -500,7 +523,7 @@ function PushForm({ node, onChange }: NodeFormProps) {
           id="push-src"
           value={srcImage}
           onChange={(e) => onChange(setParam(node, "srcImage", e.target.value))}
-          placeholder="registry:5000/owner/agent:sha (defaults to upstream Build output)"
+          placeholder="registry:5000/owner/agent:sha (defaults to upstream Build)"
           className="font-mono text-xs"
         />
         <p className="text-[11px] text-muted-foreground">
@@ -509,111 +532,175 @@ function PushForm({ node, onChange }: NodeFormProps) {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="push-reg">Target registry</Label>
-          <Input
-            id="push-reg"
-            value={targetRegistry}
-            onChange={(e) =>
-              onChange(setParam(node, "targetRegistry", e.target.value))
-            }
-            placeholder="ghcr.io"
-            className="font-mono text-xs"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="push-tag">Tag</Label>
-          <Input
-            id="push-tag"
-            value={tag}
-            onChange={(e) => onChange(setParam(node, "tag", e.target.value))}
-            placeholder="defaults to commit SHA, then 'latest'"
-            className="font-mono text-xs"
-          />
-        </div>
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="push-img">Target image</Label>
-        <Input
-          id="push-img"
-          value={targetImage}
-          onChange={(e) => onChange(setParam(node, "targetImage", e.target.value))}
-          placeholder="org/agent"
-          className="font-mono text-xs"
+      <div className="flex items-center gap-2">
+        <input
+          id="push-src-insecure"
+          type="checkbox"
+          checked={srcInsecure}
+          onChange={(e) => onChange(setParam(node, "srcInsecure", e.target.checked))}
+          className="size-3.5"
         />
-        <p className="text-[11px] text-muted-foreground">
-          Final ref: <code className="font-mono">{targetRegistry || "<registry>"}/{targetImage || "<image>"}:{tag || "<tag>"}</code>
-        </p>
+        <Label htmlFor="push-src-insecure" className="text-[11px]">
+          Source allows HTTP (default — the local{" "}
+          <code className="font-mono">registry:5000</code> is plain HTTP)
+        </Label>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="push-user">Username</Label>
-          <Input
-            id="push-user"
-            value={username}
-            onChange={(e) => onChange(setParam(node, "username", e.target.value))}
-            placeholder="(empty = anonymous / docker config)"
-            className="font-mono text-xs"
-            autoComplete="off"
-          />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs uppercase tracking-wider">
+            Targets ({targets.length})
+          </Label>
+          <button
+            type="button"
+            onClick={addTarget}
+            className="rounded-md border bg-background px-2 py-1 text-[11px] hover:bg-accent"
+          >
+            + add target
+          </button>
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="push-pass">Password / token</Label>
-          <Input
-            id="push-pass"
-            type="password"
-            value={password}
-            onChange={(e) => onChange(setParam(node, "password", e.target.value))}
-            placeholder="ghp_… or registry password"
-            className="font-mono text-xs"
-            autoComplete="new-password"
-          />
-        </div>
-      </div>
 
-      <div className="rounded-md border bg-muted/20 p-2 text-[11px]">
-        <div className="mb-1 font-medium uppercase tracking-wider text-muted-foreground">
-          Insecure transport
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="push-src-insecure"
-            type="checkbox"
-            checked={srcInsecure}
-            onChange={(e) =>
-              onChange(setParam(node, "srcInsecure", e.target.checked))
-            }
-            className="size-3.5"
+        {targets.length === 0 && (
+          <p className="rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-[11px] text-amber-700 dark:text-amber-400">
+            No targets configured — Push will fail at run time. Click “+ add
+            target”.
+          </p>
+        )}
+
+        {targets.map((t, idx) => (
+          <TargetRow
+            key={idx}
+            idx={idx}
+            target={t}
+            onPatch={(p) => patch(idx, p)}
+            onRemove={() => removeTarget(idx)}
           />
-          <Label htmlFor="push-src-insecure" className="text-[11px]">
-            Source allows HTTP (default; the local{" "}
-            <code className="font-mono">registry:5000</code> serves plain HTTP)
-          </Label>
-        </div>
-        <div className="mt-1 flex items-center gap-2">
-          <input
-            id="push-dst-insecure"
-            type="checkbox"
-            checked={dstInsecure}
-            onChange={(e) =>
-              onChange(setParam(node, "dstInsecure", e.target.checked))
-            }
-            className="size-3.5"
-          />
-          <Label htmlFor="push-dst-insecure" className="text-[11px]">
-            Destination allows HTTP (off — public registries are HTTPS)
-          </Label>
-        </div>
+        ))}
       </div>
 
       <p className="text-[11px] text-muted-foreground">
-        Image is pulled from the source over OCI v2 and pushed to the target;
-        no docker daemon needed. For GHCR, the password is a PAT with{" "}
-        <code className="font-mono">write:packages</code>.
+        Each target runs in parallel. Image is pulled from the source once and
+        pushed concurrently — no docker daemon needed. For GHCR, password is a
+        PAT with <code className="font-mono">write:packages</code>.
       </p>
+    </div>
+  );
+}
+
+function TargetRow({
+  idx,
+  target,
+  onPatch,
+  onRemove,
+}: {
+  idx: number;
+  target: PushTarget;
+  onPatch: (p: Partial<PushTarget>) => void;
+  onRemove: () => void;
+}) {
+  const ref = `${target.registry || "<registry>"}/${target.image || "<image>"}:${target.tag || "<tag>"}`;
+  return (
+    <div className="rounded-md border bg-muted/10 p-2 space-y-2">
+      <div className="flex items-center gap-2">
+        <Input
+          value={target.name ?? ""}
+          onChange={(e) => onPatch({ name: e.target.value })}
+          placeholder={`target-${idx + 1}`}
+          className="h-7 max-w-[140px] font-mono text-[11px]"
+        />
+        <span className="flex-1 truncate font-mono text-[10px] text-muted-foreground">
+          {ref}
+        </span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="rounded-md border bg-background px-2 py-1 text-[11px] text-destructive hover:bg-destructive/10"
+          aria-label="Remove target"
+        >
+          remove
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Registry
+          </Label>
+          <Input
+            value={target.registry ?? ""}
+            onChange={(e) => onPatch({ registry: e.target.value })}
+            placeholder="ghcr.io"
+            className="h-7 font-mono text-[11px]"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Tag
+          </Label>
+          <Input
+            value={target.tag ?? ""}
+            onChange={(e) => onPatch({ tag: e.target.value })}
+            placeholder="(commit sha → latest)"
+            className="h-7 font-mono text-[11px]"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Image
+        </Label>
+        <Input
+          value={target.image ?? ""}
+          onChange={(e) => onPatch({ image: e.target.value })}
+          placeholder="org/agent"
+          className="h-7 font-mono text-[11px]"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Username
+          </Label>
+          <Input
+            value={target.username ?? ""}
+            onChange={(e) => onPatch({ username: e.target.value })}
+            placeholder="(anonymous)"
+            autoComplete="off"
+            className="h-7 font-mono text-[11px]"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Password / token
+          </Label>
+          <Input
+            type="password"
+            value={target.password ?? ""}
+            onChange={(e) => onPatch({ password: e.target.value })}
+            placeholder="ghp_…"
+            autoComplete="new-password"
+            className="h-7 font-mono text-[11px]"
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          id={`push-target-${idx}-insecure`}
+          type="checkbox"
+          checked={Boolean(target.insecure)}
+          onChange={(e) => onPatch({ insecure: e.target.checked })}
+          className="size-3.5"
+        />
+        <Label
+          htmlFor={`push-target-${idx}-insecure`}
+          className="text-[10px] text-muted-foreground"
+        >
+          Allow HTTP (only for local / private registries)
+        </Label>
+      </div>
     </div>
   );
 }

@@ -137,19 +137,24 @@ export const CATALOG: CatalogEntry[] = [
     type: "flow-nodes-base.push",
     label: "Push",
     description:
-      "Mirror the locally-built image to an external registry (GHCR, Docker Hub, ECR, etc.).",
+      "Mirror the locally-built image to one or more external registries (GHCR, Docker Hub, ECR, etc.) in parallel.",
     icon: UploadCloud,
     color: "bg-cyan-500",
     outputs: 1,
     defaults: {
-      // srcImage left empty — defaults to upstream __build.image
-      targetRegistry: "ghcr.io",
-      targetImage: "",
-      tag: "",
-      username: "",
-      password: "",
+      // srcImage empty → defaults to upstream __build.image
       srcInsecure: true,
-      dstInsecure: false,
+      targets: [
+        {
+          name: "ghcr",
+          registry: "ghcr.io",
+          image: "",
+          tag: "",
+          username: "",
+          password: "",
+          insecure: false,
+        },
+      ],
     },
     group: "deploy",
   },
