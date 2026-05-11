@@ -9,7 +9,7 @@ One pipeline definition → Kubernetes, AWS Bedrock AgentCore, or Vertex AI Agen
 Engine — same governance everywhere. Works with LangGraph, LangChain, LlamaIndex,
 CrewAI, AutoGen, or raw-SDK agents. No framework lock-in.
 
-[langship.sh](https://langship.sh) · [github.com/open-gitagent/langship.sh](https://github.com/open-gitagent/langship.sh) · [CLI](./langship-cli/) · [Positioning](./aude.md) · Apache 2.0
+[langship.sh](https://langship.sh) · [github.com/open-gitagent/langship.sh](https://github.com/open-gitagent/langship.sh) · [CLI](./langship-cli/) · Apache 2.0
 
 </div>
 
