@@ -13,10 +13,6 @@ CrewAI, AutoGen, or raw-SDK agents. No framework lock-in.
 
 </div>
 
-> **Repo orientation.** This is the engine + control plane. The Go service is
-> codenamed `flow`; the product is **Langship**. The CLI lives in
-> [`langship-cli/`](./langship-cli/).
-
 ---
 
 - [What you get](#what-you-get)
