@@ -438,6 +438,9 @@ function NodeRow(props: {
 
   const buildSummary = extractBuildSummary(node.name, statusOutputs);
   const triggerSummary = extractTriggerSummary(node.name, statusOutputs);
+  const sastSummary = extractScanSummary(node.name, statusOutputs, "__sast");
+  const imageScanSummary = extractScanSummary(node.name, statusOutputs, "__imageScan");
+  const pushSummary = extractPushSummary(node.name, statusOutputs);
 
   return (
     <div className="rounded-lg border bg-muted/10">
@@ -507,6 +510,41 @@ function NodeRow(props: {
               <span>{triggerSummary.ref}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {sastSummary && (
+        <ScanResults summary={sastSummary} kind="sast" />
+      )}
+      {imageScanSummary && (
+        <ScanResults summary={imageScanSummary} kind="imageScan" />
+      )}
+
+      {pushSummary && (
+        <div className="border-t px-4 py-3 font-mono text-[11px] leading-6">
+          <div>
+            <span className="text-muted-foreground">src: </span>
+            <span className="break-all">{pushSummary.src}</span>
+          </div>
+          {pushSummary.copies.map((c, i) => (
+            <div key={i}>
+              <span className="text-muted-foreground">
+                → {c.name || c.registry}:{" "}
+              </span>
+              <span className="break-all">{c.imageRef}</span>
+              {c.error ? (
+                <span className="ml-1 text-rose-500">— {c.error}</span>
+              ) : c.digest ? (
+                <span className="ml-1 text-emerald-600 dark:text-emerald-500">
+                  {" "}
+                  ✓{" "}
+                  <span className="text-muted-foreground">
+                    {c.digest.slice(0, 19)}…
+                  </span>
+                </span>
+              ) : null}
+            </div>
+          ))}
         </div>
       )}
 
@@ -735,4 +773,263 @@ function extractTriggerSummary(
     repoUrl: typeof item.repoUrl === "string" ? item.repoUrl : undefined,
     ref: typeof item.ref === "string" ? item.ref : undefined,
   };
+}
+
+// --- scan / push helpers -------------------------------------------------
+
+type ScanFinding = {
+  tool?: string;
+  severity?: string;
+  ruleId?: string;
+  file?: string;
+  line?: number;
+  message?: string;
+};
+
+type ScanSummary = {
+  tool?: string;
+  imageRef?: string;
+  scanRef?: string;
+  qualityGate?: string;
+  dashboardUrl?: string;
+  threshold?: string;
+  counts: Record<string, number>;
+  findingCount: number;
+  findings: ScanFinding[];
+};
+
+function extractScanSummary(
+  nodeName: string,
+  outputs: Record<string, unknown> | undefined,
+  key: "__sast" | "__imageScan"
+): ScanSummary | null {
+  if (!outputs) return null;
+  const port = ((outputs[nodeName] as Record<string, unknown>) || {})["0"];
+  if (!Array.isArray(port) || port.length === 0) return null;
+  const item = port[0] as Record<string, unknown>;
+  const blob = item[key] as Record<string, unknown> | undefined;
+  if (!blob) return null;
+
+  const counts: Record<string, number> = {};
+  if (blob.counts && typeof blob.counts === "object") {
+    for (const [k, v] of Object.entries(blob.counts as Record<string, unknown>)) {
+      if (typeof v === "number") counts[k.toUpperCase()] = v;
+    }
+  }
+  const findings = Array.isArray(blob.findings) ? (blob.findings as ScanFinding[]) : [];
+  return {
+    tool: typeof blob.tool === "string" ? blob.tool : undefined,
+    imageRef: typeof blob.imageRef === "string" ? blob.imageRef : undefined,
+    scanRef: typeof blob.scanRef === "string" ? blob.scanRef : undefined,
+    qualityGate: typeof blob.qualityGate === "string" ? blob.qualityGate : undefined,
+    dashboardUrl: typeof blob.dashboardUrl === "string" ? blob.dashboardUrl : undefined,
+    threshold:
+      typeof blob.severityThreshold === "string"
+        ? (blob.severityThreshold as string)
+        : undefined,
+    counts,
+    findingCount:
+      typeof blob.finding_count === "number"
+        ? (blob.finding_count as number)
+        : findings.length,
+    findings,
+  };
+}
+
+type PushSummary = {
+  src: string;
+  copies: { name?: string; registry?: string; imageRef: string; digest?: string; error?: string }[];
+};
+
+function extractPushSummary(
+  nodeName: string,
+  outputs?: Record<string, unknown>
+): PushSummary | null {
+  if (!outputs) return null;
+  const port = ((outputs[nodeName] as Record<string, unknown>) || {})["0"];
+  if (!Array.isArray(port) || port.length === 0) return null;
+  const item = port[0] as Record<string, unknown>;
+  const blob = item.__push as Record<string, unknown> | undefined;
+  if (!blob) return null;
+  const copies = Array.isArray(blob.copies)
+    ? (blob.copies as Record<string, unknown>[]).map((c) => ({
+        name: typeof c.name === "string" ? c.name : undefined,
+        registry: typeof c.registry === "string" ? c.registry : undefined,
+        imageRef: typeof c.imageRef === "string" ? c.imageRef : "",
+        digest: typeof c.digest === "string" ? c.digest : undefined,
+        error: typeof c.error === "string" && c.error ? c.error : undefined,
+      }))
+    : [];
+  // Single-target legacy shape — promote dst to a one-entry copies array.
+  if (copies.length === 0 && typeof blob.dst === "string") {
+    copies.push({
+      name: undefined,
+      registry: undefined,
+      imageRef: blob.dst as string,
+      digest: typeof blob.digest === "string" ? (blob.digest as string) : undefined,
+      error: undefined,
+    });
+  }
+  return {
+    src: typeof blob.src === "string" ? (blob.src as string) : "",
+    copies,
+  };
+}
+
+const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"] as const;
+
+function severityClass(sev: string): string {
+  switch (sev.toUpperCase()) {
+    case "CRITICAL":
+      return "bg-rose-600/20 text-rose-700 dark:text-rose-400 border-rose-600/40";
+    case "HIGH":
+      return "bg-orange-500/20 text-orange-700 dark:text-orange-400 border-orange-500/40";
+    case "MEDIUM":
+      return "bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/40";
+    case "LOW":
+      return "bg-sky-500/20 text-sky-700 dark:text-sky-400 border-sky-500/40";
+    default:
+      return "bg-muted text-muted-foreground border-border";
+  }
+}
+
+function ScanResults({
+  summary,
+  kind,
+}: {
+  summary: ScanSummary;
+  kind: "sast" | "imageScan";
+}) {
+  const [open, setOpen] = useState(false);
+
+  const total = summary.findingCount;
+  const showFindings = summary.findings && summary.findings.length > 0;
+  const isSonar = summary.tool === "sonar";
+  const headerLabel = kind === "sast" ? "SAST" : "Image scan";
+
+  return (
+    <div className="border-t">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium uppercase tracking-wider text-muted-foreground">
+            {headerLabel}
+          </span>
+          {summary.tool && (
+            <span className="rounded-md border bg-muted/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider">
+              {summary.tool}
+            </span>
+          )}
+          {summary.threshold && (
+            <span className="text-[10px] text-muted-foreground">
+              threshold {summary.threshold}
+            </span>
+          )}
+          {/* Severity counts pills */}
+          {SEVERITY_ORDER.map((sev) => {
+            const n = summary.counts[sev] || 0;
+            if (n === 0) return null;
+            return (
+              <span
+                key={sev}
+                className={
+                  "rounded-md border px-2 py-0.5 text-[10px] font-medium " +
+                  severityClass(sev)
+                }
+              >
+                {sev.toLowerCase()} {n}
+              </span>
+            );
+          })}
+          {total === 0 && !isSonar && (
+            <span className="rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+              clean
+            </span>
+          )}
+          {isSonar && summary.qualityGate && (
+            <span
+              className={
+                "rounded-md border px-2 py-0.5 text-[10px] font-medium " +
+                (summary.qualityGate === "OK"
+                  ? "bg-emerald-500/15 text-emerald-700 border-emerald-500/40 dark:text-emerald-400"
+                  : summary.qualityGate === "WARN"
+                    ? "bg-amber-500/20 text-amber-700 border-amber-500/40 dark:text-amber-400"
+                    : "bg-rose-500/20 text-rose-700 border-rose-500/40 dark:text-rose-400")
+              }
+            >
+              gate {summary.qualityGate}
+            </span>
+          )}
+        </div>
+        {showFindings && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="flex items-center gap-1 rounded-md border bg-background px-2 py-0.5 text-[10px] hover:bg-accent"
+          >
+            {open ? (
+              <ChevronDown className="size-3" />
+            ) : (
+              <ChevronRight className="size-3" />
+            )}
+            {total} {total === 1 ? "finding" : "findings"}
+          </button>
+        )}
+        {summary.dashboardUrl && (
+          <a
+            href={summary.dashboardUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[10px] text-primary underline-offset-4 hover:underline"
+          >
+            open dashboard ↗
+          </a>
+        )}
+      </div>
+
+      {open && showFindings && (
+        <div className="border-t bg-muted/10 px-4 py-2">
+          <div className="max-h-72 overflow-auto">
+            <table className="w-full text-left text-[11px]">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="py-1 pr-2">severity</th>
+                  <th className="py-1 pr-2">rule</th>
+                  <th className="py-1 pr-2">where</th>
+                  <th className="py-1">message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.findings.slice(0, 100).map((f, i) => (
+                  <tr key={i} className="border-t border-border/50">
+                    <td className="py-1 pr-2 align-top">
+                      <span
+                        className={
+                          "rounded-md border px-1.5 py-0.5 text-[10px] font-medium " +
+                          severityClass(f.severity ?? "UNKNOWN")
+                        }
+                      >
+                        {(f.severity ?? "?").toLowerCase()}
+                      </span>
+                    </td>
+                    <td className="py-1 pr-2 align-top font-mono text-[10px]">
+                      {f.ruleId ?? ""}
+                    </td>
+                    <td className="py-1 pr-2 align-top font-mono text-[10px] text-muted-foreground">
+                      {f.file ? `${f.file}${f.line ? ":" + f.line : ""}` : ""}
+                    </td>
+                    <td className="py-1 align-top">{f.message ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {summary.findings.length > 100 && (
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                + {summary.findings.length - 100} more (truncated)
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

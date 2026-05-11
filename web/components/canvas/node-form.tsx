@@ -31,6 +31,10 @@ export function NodeForm({ node, onChange }: NodeFormProps) {
       return <PolicyForm node={node} onChange={onChange} />;
     case "flow-nodes-base.waitForApproval":
       return <ApprovalForm node={node} onChange={onChange} />;
+    case "flow-nodes-base.sast":
+      return <SastForm node={node} onChange={onChange} />;
+    case "flow-nodes-base.imageScan":
+      return <ImageScanForm node={node} onChange={onChange} />;
     case "flow-nodes-base.push":
       return <PushForm node={node} onChange={onChange} />;
     case "flow-nodes-base.deploy":
@@ -50,6 +54,8 @@ export function hasTypedForm(type: string): boolean {
   return [
     "flow-nodes-base.trigger",
     "flow-nodes-base.build",
+    "flow-nodes-base.sast",
+    "flow-nodes-base.imageScan",
     "flow-nodes-base.push",
     "flow-nodes-base.test",
     "flow-nodes-base.eval",
@@ -479,6 +485,388 @@ function ApprovalForm({ node, onChange }: NodeFormProps) {
           placeholder="user@example.com"
         />
       </div>
+    </div>
+  );
+}
+
+function SastForm({ node, onChange }: NodeFormProps) {
+  const tool = getString(node, "tool", "trivy");
+  const threshold = getString(node, "severityThreshold", "HIGH");
+  const failOnFinding = getBool(node, "failOnFinding", true);
+  const timeout = getNumber(node, "timeoutSeconds", 600);
+
+  // sonar
+  const sonarHost = getString(node, "sonarHost", "https://sonarcloud.io");
+  const organization = getString(node, "organization", "");
+  const projectKey = getString(node, "projectKey", "");
+  const sonarToken = getString(node, "sonarToken", "");
+  const branchName = getString(node, "branchName", "");
+
+  // custom
+  const image = getString(node, "image", "");
+  const command = getString(node, "command", "");
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label>Tool</Label>
+        <select
+          value={tool}
+          onChange={(e) => onChange(setParam(node, "tool", e.target.value))}
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="trivy">Trivy — vulns + secrets + IaC misconfig</option>
+          <option value="semgrep">Semgrep — code-flow / taint analysis</option>
+          <option value="gitleaks">Gitleaks — leaked secrets</option>
+          <option value="sonar">SonarCloud — code quality + quality gate</option>
+          <option value="custom">Custom — your container, your command</option>
+        </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label>Fail-at severity</Label>
+          <select
+            value={threshold}
+            onChange={(e) =>
+              onChange(setParam(node, "severityThreshold", e.target.value))
+            }
+            className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+          >
+            <option value="LOW">LOW (everything)</option>
+            <option value="MEDIUM">MEDIUM</option>
+            <option value="HIGH">HIGH (default)</option>
+            <option value="CRITICAL">CRITICAL only</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="sast-timeout">Timeout (s)</Label>
+          <Input
+            id="sast-timeout"
+            type="number"
+            min={30}
+            max={3600}
+            value={timeout}
+            onChange={(e) =>
+              onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+            }
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          id="sast-fail"
+          type="checkbox"
+          checked={failOnFinding}
+          onChange={(e) =>
+            onChange(setParam(node, "failOnFinding", e.target.checked))
+          }
+          className="size-3.5"
+        />
+        <Label htmlFor="sast-fail" className="text-[11px]">
+          Fail the run when findings exceed threshold (default on)
+        </Label>
+      </div>
+
+      {tool === "sonar" && (
+        <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            SonarCloud
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sonar-host">Host</Label>
+            <Input
+              id="sonar-host"
+              value={sonarHost}
+              onChange={(e) =>
+                onChange(setParam(node, "sonarHost", e.target.value))
+              }
+              placeholder="https://sonarcloud.io"
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="sonar-org">Organization</Label>
+              <Input
+                id="sonar-org"
+                value={organization}
+                onChange={(e) =>
+                  onChange(setParam(node, "organization", e.target.value))
+                }
+                placeholder="my-org"
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sonar-key">Project key</Label>
+              <Input
+                id="sonar-key"
+                value={projectKey}
+                onChange={(e) =>
+                  onChange(setParam(node, "projectKey", e.target.value))
+                }
+                placeholder="my-org_my-agent"
+                className="font-mono text-xs"
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sonar-token">Token</Label>
+            <Input
+              id="sonar-token"
+              type="password"
+              value={sonarToken}
+              onChange={(e) =>
+                onChange(setParam(node, "sonarToken", e.target.value))
+              }
+              placeholder="SONAR_TOKEN (User → My Account → Security)"
+              autoComplete="new-password"
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sonar-branch">Branch (optional)</Label>
+            <Input
+              id="sonar-branch"
+              value={branchName}
+              onChange={(e) =>
+                onChange(setParam(node, "branchName", e.target.value))
+              }
+              placeholder="(uses agent ref by default)"
+              className="font-mono text-xs"
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Quality-gate failure flips the run to <code>failed</code>. We
+            also link the dashboard URL on the run page.
+          </p>
+        </div>
+      )}
+
+      {tool === "custom" && (
+        <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Custom scanner
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="cust-img">Container image</Label>
+            <Input
+              id="cust-img"
+              value={image}
+              onChange={(e) =>
+                onChange(setParam(node, "image", e.target.value))
+              }
+              placeholder="ghcr.io/owner/scanner:latest"
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="cust-cmd">Command (runs in /src)</Label>
+            <Textarea
+              id="cust-cmd"
+              rows={3}
+              value={command}
+              onChange={(e) =>
+                onChange(setParam(node, "command", e.target.value))
+              }
+              spellCheck={false}
+              placeholder="my-scanner --src /src --json"
+              className="font-mono text-xs"
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Repo is mounted at <code>/src</code> read-only. Non-zero exit
+            fails the node.
+          </p>
+        </div>
+      )}
+
+      {tool !== "sonar" && tool !== "custom" && (
+        <p className="text-[11px] text-muted-foreground">
+          Sane defaults — no extra config needed. Findings list ends up in{" "}
+          <code className="font-mono">__sast.findings</code> and per-finding
+          lines stream into the build log.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ImageScanForm({ node, onChange }: NodeFormProps) {
+  const tool = getString(node, "tool", "trivy");
+  const threshold = getString(node, "severityThreshold", "HIGH");
+  const failOnFinding = getBool(node, "failOnFinding", true);
+  const timeout = getNumber(node, "timeoutSeconds", 600);
+  const insecure = getBool(node, "insecure", true);
+  const imageRef = getString(node, "imageRef", "");
+  const registryUsername = getString(node, "registryUsername", "");
+  const registryPassword = getString(node, "registryPassword", "");
+  const image = getString(node, "image", "");
+  const command = getString(node, "command", "");
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label>Tool</Label>
+        <select
+          value={tool}
+          onChange={(e) => onChange(setParam(node, "tool", e.target.value))}
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="trivy">Trivy — CVEs + secrets in the image</option>
+          <option value="grype">Grype — Anchore CVE scanner</option>
+          <option value="custom">Custom — your container, your command</option>
+        </select>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="is-ref">Image ref (optional)</Label>
+        <Input
+          id="is-ref"
+          value={imageRef}
+          onChange={(e) => onChange(setParam(node, "imageRef", e.target.value))}
+          placeholder="registry:5000/owner/agent:sha (defaults to upstream Build)"
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Leave blank to use upstream{" "}
+          <code className="font-mono">__build.image</code>.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label>Fail-at severity</Label>
+          <select
+            value={threshold}
+            onChange={(e) =>
+              onChange(setParam(node, "severityThreshold", e.target.value))
+            }
+            className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+          >
+            <option value="LOW">LOW</option>
+            <option value="MEDIUM">MEDIUM</option>
+            <option value="HIGH">HIGH (default)</option>
+            <option value="CRITICAL">CRITICAL only</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="is-timeout">Timeout (s)</Label>
+          <Input
+            id="is-timeout"
+            type="number"
+            min={30}
+            max={3600}
+            value={timeout}
+            onChange={(e) =>
+              onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+            }
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          id="is-fail"
+          type="checkbox"
+          checked={failOnFinding}
+          onChange={(e) =>
+            onChange(setParam(node, "failOnFinding", e.target.checked))
+          }
+          className="size-3.5"
+        />
+        <Label htmlFor="is-fail" className="text-[11px]">
+          Fail run when findings exceed threshold
+        </Label>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          id="is-insecure"
+          type="checkbox"
+          checked={insecure}
+          onChange={(e) =>
+            onChange(setParam(node, "insecure", e.target.checked))
+          }
+          className="size-3.5"
+        />
+        <Label htmlFor="is-insecure" className="text-[11px]">
+          Source registry allows HTTP (default; the local{" "}
+          <code className="font-mono">registry:5000</code> is plain HTTP)
+        </Label>
+      </div>
+
+      {tool !== "custom" && (
+        <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Registry auth (optional — only needed for private sources)
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="is-user">Username</Label>
+              <Input
+                id="is-user"
+                value={registryUsername}
+                onChange={(e) =>
+                  onChange(setParam(node, "registryUsername", e.target.value))
+                }
+                placeholder="(empty = anonymous)"
+                autoComplete="off"
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="is-pass">Password / token</Label>
+              <Input
+                id="is-pass"
+                type="password"
+                value={registryPassword}
+                onChange={(e) =>
+                  onChange(setParam(node, "registryPassword", e.target.value))
+                }
+                placeholder="ghp_… or registry password"
+                autoComplete="new-password"
+                className="font-mono text-xs"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tool === "custom" && (
+        <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Custom scanner
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="is-cust-img">Container image</Label>
+            <Input
+              id="is-cust-img"
+              value={image}
+              onChange={(e) => onChange(setParam(node, "image", e.target.value))}
+              placeholder="ghcr.io/owner/scanner:latest"
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="is-cust-cmd">
+              Command (image ref exported as <code>$IMAGE_REF</code>)
+            </Label>
+            <Textarea
+              id="is-cust-cmd"
+              rows={3}
+              value={command}
+              onChange={(e) =>
+                onChange(setParam(node, "command", e.target.value))
+              }
+              spellCheck={false}
+              placeholder='trivy image --quiet "$IMAGE_REF"'
+              className="font-mono text-xs"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

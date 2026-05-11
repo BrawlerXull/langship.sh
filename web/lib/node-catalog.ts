@@ -15,6 +15,8 @@ import {
   TestTube2,
   Gauge,
   ShieldCheck,
+  ShieldAlert,
+  Container,
   Pause,
   Rocket,
   ArrowUpFromLine,
@@ -130,6 +132,54 @@ export const CATALOG: CatalogEntry[] = [
     defaults: {
       reason: "Manual review",
       reviewers: [],
+    },
+    group: "gate",
+  },
+  {
+    type: "flow-nodes-base.imageScan",
+    label: "Image Scan",
+    description:
+      "Scan the BUILT container image for CVEs, secrets, and base-image vulns. Pulls from the local registry and gates on severity.",
+    icon: Container,
+    color: "bg-fuchsia-600",
+    outputs: 1,
+    defaults: {
+      tool: "trivy",
+      severityThreshold: "HIGH",
+      failOnFinding: true,
+      timeoutSeconds: 600,
+      insecure: true,
+      registryUsername: "",
+      registryPassword: "",
+      // imageRef left empty → defaults to upstream __build.image
+      // custom-only:
+      image: "",
+      command: "",
+    },
+    group: "gate",
+  },
+  {
+    type: "flow-nodes-base.sast",
+    label: "SAST",
+    description:
+      "Static analysis: scan the agent repo for vulnerabilities, secrets, and quality issues. Pluggable tool — Trivy / Semgrep / Gitleaks / SonarCloud / custom.",
+    icon: ShieldAlert,
+    color: "bg-rose-500",
+    outputs: 1,
+    defaults: {
+      tool: "trivy",
+      severityThreshold: "HIGH",
+      failOnFinding: true,
+      timeoutSeconds: 600,
+      // sonar-only:
+      sonarHost: "https://sonarcloud.io",
+      organization: "",
+      projectKey: "",
+      sonarToken: "",
+      branchName: "",
+      // custom-only:
+      image: "",
+      command: "",
     },
     group: "gate",
   },

@@ -81,6 +81,12 @@ func (e *PushExecutor) Execute(ctx context.Context, node models.NodeDef, inputs 
 	if srcImage == "" {
 		return nil, errors.New("push: no source image (set srcImage or wire a Build node upstream)")
 	}
+	// Build pushes to `registry:5000` (the compose service name), but Push
+	// runs in the flow process on the host where `registry` doesn't
+	// resolve. Rewrite to `localhost:5000` so crane.Pull can reach the
+	// published host port. Symmetric to the rewrite ImageScan does in the
+	// other direction.
+	srcImage = pushSourceHostRef(srcImage)
 	if _, err := name.ParseReference(srcImage); err != nil {
 		return nil, fmt.Errorf("push: invalid src %q: %w", srcImage, err)
 	}
@@ -311,6 +317,18 @@ func defaultName(explicit, registry string, idx int) string {
 		return fmt.Sprintf("target-%d", idx+1)
 	}
 	return host
+}
+
+// pushSourceHostRef rewrites a compose-internal registry hostname to its
+// host-published equivalent so the host-running flow process can actually
+// reach the registry. Only the most common pair we set up
+// (`registry:5000` → `localhost:5000`) is rewritten; everything else
+// passes through unchanged.
+func pushSourceHostRef(ref string) string {
+	if strings.HasPrefix(ref, "registry:5000/") {
+		return "localhost:5000" + ref[len("registry:5000"):]
+	}
+	return ref
 }
 
 func anyToBool(v any, def bool) bool {

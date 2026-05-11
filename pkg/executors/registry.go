@@ -56,9 +56,11 @@ func RegisterAll(deps ...RegistryDeps) {
 	// Human-in-the-loop
 	Register("flow-nodes-base.waitForApproval", &ApprovalExecutor{})
 
-	// CI/CD primitives — Build + Push are real; the rest are stubs for now.
+	// CI/CD primitives — Build + Push + SAST are real; the rest are stubs.
 	Register("flow-nodes-base.build", &BuildExecutor{Agents: d.Agents})
 	Register("flow-nodes-base.push", &PushExecutor{})
+	Register("flow-nodes-base.sast", &SastExecutor{Agents: d.Agents})
+	Register("flow-nodes-base.imageScan", &ImageScanExecutor{})
 	Register("flow-nodes-base.test", &TestExecutor{})
 	Register("flow-nodes-base.eval", &EvalExecutor{})
 	Register("flow-nodes-base.policy", &PolicyExecutor{})
