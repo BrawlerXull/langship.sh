@@ -54,6 +54,24 @@ export type CredentialBody = {
   kv?: Record<string, string>;
 };
 
+// An Environment is a sequencing container: a name + description + an
+// ordered list of pipeline IDs (the promotion sequence, reorderable).
+// Per-deploy config (credential / runtime target / approval method)
+// lives on the nodes, not the env.
+export type Environment = {
+  id: string;
+  name: string;
+  description?: string;
+  pipelineIds?: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EnvironmentBody = {
+  name: string;
+  description?: string;
+};
+
 export type Agent = {
   id: string;
   name: string;
@@ -66,7 +84,7 @@ export type Agent = {
   webhookInstalledAt?: string;
   authStatus?: AuthStatus;
   authCheckedAt?: string;
-  attachedPipelines?: string[];
+  environments?: string[];
   credentials?: PublicCredential[];
   createdAt: string;
   updatedAt: string;
@@ -196,13 +214,13 @@ export const api = {
   uninstallAgentWebhook: (id: string) =>
     fetch(`${base}/api/agents/${id}/webhook`, { method: "DELETE" }).then(handle<Agent>),
 
-  attachPipeline: (id: string, pipelineId: string) =>
-    fetch(`${base}/api/agents/${id}/pipelines/${pipelineId}`, {
+  agentFollowEnv: (id: string, envName: string) =>
+    fetch(`${base}/api/agents/${id}/environments/${encodeURIComponent(envName)}`, {
       method: "POST",
     }).then(handle<Agent>),
 
-  detachPipeline: (id: string, pipelineId: string) =>
-    fetch(`${base}/api/agents/${id}/pipelines/${pipelineId}`, {
+  agentUnfollowEnv: (id: string, envName: string) =>
+    fetch(`${base}/api/agents/${id}/environments/${encodeURIComponent(envName)}`, {
       method: "DELETE",
     }).then(handle<void>),
 
@@ -210,9 +228,59 @@ export const api = {
     fetch(`${base}/api/agents/${id}/trigger`, { method: "POST" }).then(
       handle<{
         executionIds: string[];
-        failures?: { pipelineId: string; reason: string; error?: string }[];
+        failures?: {
+          environment?: string;
+          pipelineId?: string;
+          reason: string;
+          error?: string;
+        }[];
       }>
     ),
+
+  // ── Environments ─────────────────────────────────────────────────────
+  listEnvironments: () =>
+    fetch(`${base}/api/environments`).then(handle<Environment[]>),
+
+  getEnvironment: (name: string) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(name)}`).then(
+      handle<Environment>
+    ),
+
+  createEnvironment: (body: EnvironmentBody) =>
+    fetch(`${base}/api/environments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<Environment>),
+
+  updateEnvironment: (name: string, body: EnvironmentBody) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<Environment>),
+
+  deleteEnvironment: (name: string) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then(handle<void>),
+
+  envAddPipeline: (envName: string, pipelineId: string) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(envName)}/pipelines/${pipelineId}`, {
+      method: "POST",
+    }).then(handle<Environment>),
+
+  envRemovePipeline: (envName: string, pipelineId: string) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(envName)}/pipelines/${pipelineId}`, {
+      method: "DELETE",
+    }).then(handle<void>),
+
+  reorderEnvPipelines: (envName: string, pipelineIds: string[]) =>
+    fetch(`${base}/api/environments/${encodeURIComponent(envName)}/pipelines`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pipelineIds }),
+    }).then(handle<Environment>),
 
   listCredentials: (agentId: string) =>
     fetch(`${base}/api/agents/${agentId}/credentials`).then(

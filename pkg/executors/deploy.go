@@ -44,16 +44,6 @@ func (e *DeployExecutor) Execute(ctx context.Context, node models.NodeDef, input
 	}
 	logger := engine.NodeLoggerFromContext(ctx)
 
-	target := strings.ToLower(strParam(node.Parameters, "target", "agentcore"))
-	switch target {
-	case "agentcore":
-		// supported below
-	case "k8s", "kubernetes", "vertex", "":
-		return nil, fmt.Errorf("deploy: target %q not yet implemented (only \"agentcore\" today)", target)
-	default:
-		return nil, fmt.Errorf("deploy: unknown target %q", target)
-	}
-
 	trigger := firstItem(inputs)
 	agentID, _ := trigger["agentId"].(string)
 	if agentID == "" {
@@ -63,18 +53,33 @@ func (e *DeployExecutor) Execute(ctx context.Context, node models.NodeDef, input
 	if err != nil {
 		return nil, fmt.Errorf("deploy: load agent %q: %w", agentID, err)
 	}
-	credName := strParam(node.Parameters, "credentialName", "aws")
+	// envName is purely informational here (recorded in the summary).
+	envName, _ := trigger["environment"].(string)
+
+	// target: node param → "agentcore".
+	target := strings.ToLower(strParam(node.Parameters, "target", ""))
+	if target == "" {
+		target = "agentcore"
+	}
+	switch target {
+	case "agentcore":
+		// supported below
+	case "k8s", "kubernetes", "vertex":
+		return nil, fmt.Errorf("deploy: target %q not yet implemented (only \"agentcore\" today)", target)
+	default:
+		return nil, fmt.Errorf("deploy: unknown target %q", target)
+	}
+
+	// credentialName: node param → "aws".
+	credName := strParam(node.Parameters, "credentialName", "")
+	if credName == "" {
+		credName = "aws"
+	}
 	cred, credScope, err := e.lookupCredential(ctx, a, credName)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: %w", err)
 	}
-	logger.Log(fmt.Sprintf("[deploy] using %s credential %q", credScope, credName))
-	if cred.Type != storage.CredentialAWS {
-		return nil, fmt.Errorf("deploy: credential %q is type %q; target=agentcore needs an aws credential", credName, cred.Type)
-	}
-	if cred.AwsRegion == "" || cred.AwsAccountID == "" || cred.AwsCrossAccountRoleArn == "" {
-		return nil, fmt.Errorf("deploy: aws credential %q is missing region / accountId / crossAccountRoleArn", credName)
-	}
+	logger.Log(fmt.Sprintf("[deploy] target=%s credential=%s (%s)", target, credName, credScope))
 
 	image := resolveDeployImage(node.Parameters, inputs)
 	if image == "" {
@@ -143,6 +148,7 @@ func (e *DeployExecutor) Execute(ctx context.Context, node models.NodeDef, input
 
 	summary := map[string]any{
 		"target":          "agentcore",
+		"environment":     envName,
 		"agentId":         agentID,
 		"agentName":       a.Name,
 		"credentialName":  cred.Name,

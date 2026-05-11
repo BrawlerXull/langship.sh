@@ -486,6 +486,9 @@ function ApprovalForm({ node, onChange }: NodeFormProps) {
   const reason = getString(node, "reason", "Manual review");
   const reviewers = getStringArray(node, "reviewers");
   const text = reviewers.join("\n");
+  const method = getString(node, "method", "");
+  const minApprovers = getNumber(node, "minApprovers", 0);
+  const timeout = getNumber(node, "timeoutSeconds", 0);
 
   function commit(t: string) {
     const parsed = t.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -517,6 +520,58 @@ function ApprovalForm({ node, onChange }: NodeFormProps) {
           className="font-mono text-xs"
           placeholder="user@example.com"
         />
+      </div>
+
+      <div className="space-y-1.5">
+        <Label>Method</Label>
+        <select
+          value={method}
+          onChange={(e) => onChange(setParam(node, "method", e.target.value))}
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="">UI (human) — default</option>
+          <option value="ui">UI (human)</option>
+          <option value="quorum">Quorum (N approvers)</option>
+          <option value="auto">Auto (don&rsquo;t pause)</option>
+        </select>
+        <p className="text-[11px] text-muted-foreground">
+          <strong>auto</strong> emits straight to the approved output without
+          pausing. Quorum N&gt;1 enforcement is surfaced to reviewers but not
+          yet hard-enforced.
+        </p>
+      </div>
+
+      {method === "quorum" && (
+        <div className="space-y-1.5">
+          <Label htmlFor="a-minappr">Min approvers (override)</Label>
+          <Input
+            id="a-minappr"
+            type="number"
+            value={minApprovers}
+            onChange={(e) =>
+              onChange(setParam(node, "minApprovers", Number(e.target.value)))
+            }
+            placeholder="(inherit)"
+            className="font-mono text-xs"
+          />
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor="a-timeout">Timeout seconds (override, 0=inherit)</Label>
+        <Input
+          id="a-timeout"
+          type="number"
+          value={timeout}
+          onChange={(e) =>
+            onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+          }
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          When set, the run is auto-rejected after this long (routed to the
+          rejected output).
+        </p>
       </div>
     </div>
   );
@@ -1127,8 +1182,8 @@ function TargetRow({
 }
 
 function DeployForm({ node, onChange }: NodeFormProps) {
-  const target = getString(node, "target", "agentcore");
-  const credentialName = getString(node, "credentialName", "aws");
+  const target = getString(node, "target", "");
+  const credentialName = getString(node, "credentialName", "");
   const runtimeName = getString(node, "runtimeName", "");
   const image = getString(node, "image", "");
   const timeout = getNumber(node, "timeoutSeconds", 600);
@@ -1156,6 +1211,7 @@ function DeployForm({ node, onChange }: NodeFormProps) {
           onChange={(e) => onChange(setParam(node, "target", e.target.value))}
           className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
         >
+          <option value="">AWS Bedrock AgentCore — default</option>
           <option value="agentcore">AWS Bedrock AgentCore</option>
           <option value="kubernetes" disabled>
             Kubernetes (coming soon)
@@ -1165,9 +1221,8 @@ function DeployForm({ node, onChange }: NodeFormProps) {
           </option>
         </select>
         <p className="text-[11px] text-muted-foreground">
-          AgentCore deploys the upstream Push image. AWS region + account +
-          cross-account role come from the named credential below. The deploy
-          summary will include the public invoke URL.
+          AgentCore deploys the upstream Push image; the deploy summary
+          includes the public invoke URL.
         </p>
       </div>
 
@@ -1183,8 +1238,8 @@ function DeployForm({ node, onChange }: NodeFormProps) {
           className="font-mono text-xs"
         />
         <p className="text-[11px] text-muted-foreground">
-          Must match a credential of type <code>aws</code> on the Agent
-          (Credentials section on the agent page).
+          Defaults to <code>aws</code>. Must match a credential of type{" "}
+          <code>aws</code> in the global pool or an agent override.
         </p>
       </div>
 

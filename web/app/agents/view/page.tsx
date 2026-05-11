@@ -34,6 +34,7 @@ import {
   api,
   type Agent,
   type AuthStatus,
+  type Environment,
   type FlowSummary,
   type PublicCredential,
   type Run,
@@ -56,27 +57,35 @@ function AgentDetail() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [config, setConfig] = useState<ServerConfig | null>(null);
+  const [environments, setEnvironments] = useState<Environment[]>([]);
   const [pipelines, setPipelines] = useState<FlowSummary[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // which action is in flight
-  const [showPipelinePicker, setShowPipelinePicker] = useState(false);
+  const [showEnvPicker, setShowEnvPicker] = useState(false);
 
   async function load() {
     if (!id) return;
     try {
-      const [a, cfg, allPipes] = await Promise.all([
+      const [a, cfg, allEnvs, allPipes] = await Promise.all([
         api.getAgent(id),
         api.getConfig().catch(() => null),
+        api.listEnvironments().catch(() => []),
         api.listFlows().catch(() => []),
       ]);
       setAgent(a);
       setConfig(cfg);
+      setEnvironments(allEnvs);
       setPipelines(allPipes);
-      // Pull recent runs across all attached pipelines.
-      if (a.attachedPipelines?.length) {
+      // Recent runs across the pipelines of every followed env.
+      const followed = (a.environments ?? [])
+        .map((n) => allEnvs.find((e) => e.name === n))
+        .filter((e): e is Environment => Boolean(e));
+      const pipelineIds = new Set<string>();
+      followed.forEach((e) => (e.pipelineIds ?? []).forEach((pid) => pipelineIds.add(pid)));
+      if (pipelineIds.size) {
         const lists = await Promise.all(
-          a.attachedPipelines.map((pid) =>
+          [...pipelineIds].map((pid) =>
             api.listRuns({ pipelineId: pid, limit: 5 }).catch(() => [])
           )
         );
@@ -134,7 +143,10 @@ function AgentDetail() {
       }
       throw new Error(
         fails
-          .map((f) => `${f.pipelineId}: ${f.reason}${f.error ? " — " + f.error : ""}`)
+          .map((f) => {
+            const where = [f.environment, f.pipelineId].filter(Boolean).join("/");
+            return `${where || "?"}: ${f.reason}${f.error ? " — " + f.error : ""}`;
+          })
           .join("; ")
       );
     });
@@ -162,18 +174,18 @@ function AgentDetail() {
     });
   }
 
-  async function onAttachPipeline(pipelineId: string) {
-    await withBusy("attach", async () => {
-      await api.attachPipeline(id, pipelineId);
-      setShowPipelinePicker(false);
+  async function onFollowEnv(envName: string) {
+    await withBusy("follow-env", async () => {
+      await api.agentFollowEnv(id, envName);
+      setShowEnvPicker(false);
       await load();
     });
   }
 
-  async function onDetachPipeline(pipelineId: string) {
-    if (!confirm("Detach this pipeline from the agent?")) return;
-    await withBusy("detach", async () => {
-      await api.detachPipeline(id, pipelineId);
+  async function onUnfollowEnv(envName: string) {
+    if (!confirm(`Stop following environment "${envName}"? This agent will no longer dispatch its pipelines.`)) return;
+    await withBusy("unfollow-env", async () => {
+      await api.agentUnfollowEnv(id, envName);
       await load();
     });
   }
@@ -207,12 +219,14 @@ function AgentDetail() {
   }
 
   const lastRun = runs[0];
-  const attachedPipelineDetails = (agent.attachedPipelines ?? [])
-    .map((pid) => pipelines.find((p) => p.id === pid))
-    .filter((p): p is FlowSummary => Boolean(p));
-  const attachable = pipelines.filter(
-    (p) => !agent.attachedPipelines?.includes(p.id)
+  const followedEnvs = (agent.environments ?? [])
+    .map((n) => environments.find((e) => e.name === n))
+    .filter((e): e is Environment => Boolean(e));
+  const followableEnvs = environments.filter(
+    (e) => !agent.environments?.includes(e.name)
   );
+  const pipelineName = (pid: string) =>
+    pipelines.find((p) => p.id === pid)?.name ?? pid;
 
   return (
     <div className="space-y-6 p-6">
@@ -263,16 +277,16 @@ function AgentDetail() {
               disabled={
                 busy === "trigger" ||
                 !config?.orchestratorEnabled ||
-                !agent.attachedPipelines?.length
+                !agent.environments?.length
               }
               title={
                 !config?.orchestratorEnabled
                   ? "Orchestrator not configured (Restate unreachable)"
-                  : !agent.attachedPipelines?.length
-                    ? "Attach a pipeline first"
+                  : !agent.environments?.length
+                    ? "Follow an environment first"
                     : busy === "trigger"
                       ? "Dispatching…"
-                      : "Trigger a run on every attached pipeline"
+                      : "Trigger a run across the followed environments' pipelines"
               }
             >
               <Play />
@@ -307,28 +321,28 @@ function AgentDetail() {
                 <span className="text-sm text-muted-foreground">No runs yet.</span>
               )}
             </Field>
-            <Field label="Pipelines">
-              {attachedPipelineDetails.length === 0 ? (
+            <Field label="Environments">
+              {followedEnvs.length === 0 ? (
                 <span className="text-sm text-muted-foreground">
-                  None attached.{" "}
-                  <Link href="/flows/new" className="underline hover:text-foreground">
-                    Create one
+                  None followed.{" "}
+                  <Link href="/environments" className="underline hover:text-foreground">
+                    Manage environments
                   </Link>
                   .
                 </span>
               ) : (
                 <span className="text-sm">
-                  {attachedPipelineDetails.length} attached
+                  {followedEnvs.map((e) => e.name).join(", ")}
                 </span>
               )}
             </Field>
           </div>
 
-          {agent.attachedPipelines?.length ? (
+          {agent.environments?.length ? (
             <p className="text-sm text-muted-foreground">
               Pushes to{" "}
               <code className="font-mono text-xs">{agent.name}</code> route through
-              this agent&rsquo;s pipelines (matched by branch).
+              the pipelines of the followed environments (matched by branch).
             </p>
           ) : null}
 
@@ -430,58 +444,66 @@ function AgentDetail() {
           </CardContent>
         </Card>
 
-        {/* Pipelines ----------------------------------------------------- */}
+        {/* Environments -------------------------------------------------- */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
-            <CardTitle>Pipelines</CardTitle>
-            {attachable.length > 0 ? (
+            <CardTitle>Environments followed</CardTitle>
+            {followableEnvs.length > 0 ? (
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => setShowPipelinePicker((v) => !v)}
+                onClick={() => setShowEnvPicker((v) => !v)}
               >
                 <Plus />
-                Add pipeline
+                Follow env
+              </Button>
+            ) : environments.length === 0 ? (
+              <Button size="sm" variant="ghost" asChild>
+                <Link href="/environments">Create one</Link>
               </Button>
             ) : (
               <Button size="sm" variant="ghost" disabled>
-                No more to add
+                Following all
               </Button>
             )}
           </CardHeader>
           <CardContent className="space-y-3">
-            {attachedPipelineDetails.length === 0 ? (
+            {followedEnvs.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No pipelines attached. Click &ldquo;Add pipeline&rdquo; to bind one
-                (or create one in{" "}
-                <Link href="/flows/new" className="underline">
-                  /flows/new
+                Not following any environment. Follow one to dispatch its
+                pipelines for this agent. Manage envs on the{" "}
+                <Link href="/environments" className="underline">
+                  Environments page
                 </Link>
-                ).
+                .
               </p>
             ) : (
               <ul className="space-y-1.5">
-                {attachedPipelineDetails.map((p) => (
+                {followedEnvs.map((e) => (
                   <li
-                    key={p.id}
+                    key={e.id}
                     className="flex items-center justify-between gap-2 rounded-md border bg-muted/20 px-3 py-2"
                   >
                     <div className="min-w-0">
                       <Link
-                        href={`/flows/view/?id=${encodeURIComponent(p.id)}`}
-                        className="truncate text-sm font-medium hover:underline"
+                        href="/environments"
+                        className="truncate text-sm font-medium font-mono hover:underline"
                       >
-                        {p.name || "Untitled"}
+                        {e.name}
                       </Link>
                       <div className="text-[11px] text-muted-foreground">
-                        {p.nodeCount} nodes · {formatDate(p.updatedAt)}
+                        {(e.pipelineIds ?? []).length === 0
+                          ? "no pipelines"
+                          : (e.pipelineIds ?? [])
+                              .map(pipelineName)
+                              .join(" → ")}
                       </div>
                     </div>
                     <Button
                       variant="ghost"
                       size="icon"
-                      aria-label="Detach pipeline"
-                      onClick={() => onDetachPipeline(p.id)}
+                      aria-label="Unfollow environment"
+                      onClick={() => onUnfollowEnv(e.name)}
                     >
                       <XCircle className="size-4" />
                     </Button>
@@ -490,23 +512,23 @@ function AgentDetail() {
               </ul>
             )}
 
-            {showPipelinePicker && attachable.length > 0 && (
+            {showEnvPicker && followableEnvs.length > 0 && (
               <div className="rounded-md border bg-background p-2">
                 <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Attach a pipeline
+                  Follow an environment
                 </div>
                 <ul className="space-y-1">
-                  {attachable.map((p) => (
-                    <li key={p.id}>
+                  {followableEnvs.map((e) => (
+                    <li key={e.id}>
                       <button
                         type="button"
-                        onClick={() => onAttachPipeline(p.id)}
-                        disabled={busy === "attach"}
+                        onClick={() => onFollowEnv(e.name)}
+                        disabled={busy === "follow-env"}
                         className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
                       >
-                        <span className="truncate">{p.name || "Untitled"}</span>
+                        <span className="truncate font-mono">{e.name}</span>
                         <span className="text-[11px] text-muted-foreground">
-                          {p.nodeCount} nodes
+                          {(e.pipelineIds ?? []).length} pipelines
                         </span>
                       </button>
                     </li>

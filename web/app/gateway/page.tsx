@@ -9,7 +9,7 @@ import { Activity, ArrowLeftRight, Coins, Gauge, Radio } from "lucide-react";
 
 export default function GatewayPage() {
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 p-6">
+    <div className="w-full space-y-6 p-6">
       <div>
         <div className="mb-1 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
           <Radio className="size-3.5" />

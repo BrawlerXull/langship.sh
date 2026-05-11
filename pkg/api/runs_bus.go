@@ -14,6 +14,7 @@ type RunCreatedEvent struct {
 	PipelineID   string    `json:"pipelineId,omitempty"`
 	PipelineName string    `json:"pipelineName,omitempty"`
 	AgentID      string    `json:"agentId,omitempty"`
+	Environment  string    `json:"environment,omitempty"`
 	Source       string    `json:"source,omitempty"` // "manual" | "github_push"
 	StartedAt    time.Time `json:"startedAt"`
 }

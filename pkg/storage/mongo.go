@@ -72,6 +72,12 @@ func (m *Mongo) Credentials() CredentialStore {
 	return &mongoCredentials{coll: m.db.Collection("credentials")}
 }
 
+// Environments returns the global EnvironmentStore backed by this Mongo
+// connection.
+func (m *Mongo) Environments() EnvironmentStore {
+	return &mongoEnvironments{coll: m.db.Collection("environments")}
+}
+
 func (m *Mongo) ensureIndexes(ctx context.Context) error {
 	if _, err := m.db.Collection("pipelines").Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
@@ -94,6 +100,12 @@ func (m *Mongo) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
 	}); err != nil {
 		return fmt.Errorf("credentials indexes: %w", err)
+	}
+	if _, err := m.db.Collection("environments").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "name", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
+	}); err != nil {
+		return fmt.Errorf("environments indexes: %w", err)
 	}
 	return nil
 }
@@ -517,6 +529,66 @@ func (s *mongoCredentials) List(ctx context.Context) ([]*Credential, error) {
 	}
 	defer cur.Close(ctx)
 	var out []*Credential
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// --- environments (global) -----------------------------------------------
+
+type mongoEnvironments struct{ coll *mongo.Collection }
+
+func (s *mongoEnvironments) Create(ctx context.Context, e *Environment) error {
+	if _, err := s.coll.InsertOne(ctx, e); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *mongoEnvironments) GetByName(ctx context.Context, name string) (*Environment, error) {
+	var e Environment
+	if err := s.coll.FindOne(ctx, bson.M{"name": name}).Decode(&e); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *mongoEnvironments) Update(ctx context.Context, e *Environment) error {
+	res, err := s.coll.ReplaceOne(ctx, bson.M{"name": e.Name}, e)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoEnvironments) Delete(ctx context.Context, name string) error {
+	res, err := s.coll.DeleteOne(ctx, bson.M{"name": name})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoEnvironments) List(ctx context.Context) ([]*Environment, error) {
+	cur, err := s.coll.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "name", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []*Environment
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}

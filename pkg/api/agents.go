@@ -58,7 +58,7 @@ type Agent struct {
 	WebhookInstalledAt *time.Time         `json:"webhookInstalledAt,omitempty"`
 	AuthStatus         storage.AuthStatus `json:"authStatus,omitempty"`
 	AuthCheckedAt      *time.Time         `json:"authCheckedAt,omitempty"`
-	AttachedPipelines  []string           `json:"attachedPipelines,omitempty"`
+	Environments       []string           `json:"environments,omitempty"`
 	Credentials        []PublicCredential `json:"credentials,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
@@ -108,7 +108,7 @@ func (s *Server) publicAgent(a *storage.Agent) Agent {
 		WebhookInstalledAt: a.WebhookInstalledAt,
 		AuthStatus:         a.AuthStatus,
 		AuthCheckedAt:      a.AuthCheckedAt,
-		AttachedPipelines:  a.AttachedPipelines,
+		Environments:       a.Environments,
 		Credentials:        creds,
 		CreatedAt:          a.CreatedAt,
 		UpdatedAt:          a.UpdatedAt,
@@ -342,27 +342,31 @@ func (s *Server) handleUninstallWebhook(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, s.publicAgent(a))
 }
 
-// --- pipeline attachments ------------------------------------------------
+// --- environment subscriptions -------------------------------------------
 
-func (s *Server) handleAttachPipeline(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAgentFollowEnv(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	pipelineID := r.PathValue("pipelineId")
+	envName := r.PathValue("envName")
 	a, err := s.agents.Get(r.Context(), id)
 	if err != nil {
 		writeStorageErr(w, err, "agent not found")
 		return
 	}
-	if _, err := s.pipelines.Get(r.Context(), pipelineID); err != nil {
-		writeStorageErr(w, err, "pipeline not found")
+	if s.environments == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("environments store not configured"))
 		return
 	}
-	for _, existing := range a.AttachedPipelines {
-		if existing == pipelineID {
-			writeJSON(w, http.StatusOK, s.publicAgent(a)) // already attached
+	if _, err := s.environments.GetByName(r.Context(), envName); err != nil {
+		writeStorageErr(w, err, "environment not found")
+		return
+	}
+	for _, e := range a.Environments {
+		if strings.EqualFold(e, envName) {
+			writeJSON(w, http.StatusOK, s.publicAgent(a)) // already following
 			return
 		}
 	}
-	a.AttachedPipelines = append(a.AttachedPipelines, pipelineID)
+	a.Environments = append(a.Environments, envName)
 	a.UpdatedAt = time.Now().UTC()
 	if err := s.agents.Update(r.Context(), a); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -371,21 +375,21 @@ func (s *Server) handleAttachPipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.publicAgent(a))
 }
 
-func (s *Server) handleDetachPipeline(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAgentUnfollowEnv(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	pipelineID := r.PathValue("pipelineId")
+	envName := r.PathValue("envName")
 	a, err := s.agents.Get(r.Context(), id)
 	if err != nil {
 		writeStorageErr(w, err, "agent not found")
 		return
 	}
-	out := a.AttachedPipelines[:0]
-	for _, p := range a.AttachedPipelines {
-		if p != pipelineID {
-			out = append(out, p)
+	out := a.Environments[:0]
+	for _, e := range a.Environments {
+		if !strings.EqualFold(e, envName) {
+			out = append(out, e)
 		}
 	}
-	a.AttachedPipelines = out
+	a.Environments = out
 	a.UpdatedAt = time.Now().UTC()
 	if err := s.agents.Update(r.Context(), a); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -396,8 +400,8 @@ func (s *Server) handleDetachPipeline(w http.ResponseWriter, r *http.Request) {
 
 // --- manual trigger ------------------------------------------------------
 
-// handleTriggerAgent dispatches a run on each attached pipeline. Trigger
-// data describes who/what triggered the run (manual / webhook / etc.).
+// handleTriggerAgent dispatches runs across the agent's followed
+// environments. Trigger data describes who/what triggered the run.
 func (s *Server) handleTriggerAgent(w http.ResponseWriter, r *http.Request) {
 	if s.orch == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("orchestrator not configured"))
@@ -409,8 +413,8 @@ func (s *Server) handleTriggerAgent(w http.ResponseWriter, r *http.Request) {
 		writeStorageErr(w, err, "agent not found")
 		return
 	}
-	if len(a.AttachedPipelines) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("agent has no attached pipelines"))
+	if len(a.Environments) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("agent follows no environments"))
 		return
 	}
 	triggerData := []map[string]any{{
@@ -437,140 +441,149 @@ func (s *Server) handleTriggerAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// dispatchAgent runs each attached pipeline asynchronously. Returns the
-// execution IDs collected and a per-pipeline failure list so the caller
-// can surface skip reasons to the user instead of silently returning [].
+// dispatchAgent fans out across the agent's followed environments. For
+// each env it iterates the env's pipelines, applies the per-pipeline
+// branch filter (for push triggers), stamps the env name + agent info
+// into the trigger payload, and submits the run. Returns the execution
+// IDs and a per-(env,pipeline) failure list so callers can surface skips.
 func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger any) ([]string, []DispatchFailure, error) {
-	triggerJSON, _ := json.Marshal(trigger)
-	var triggerItems []models.Item
-	if items, ok := trigger.([]map[string]any); ok {
-		for _, m := range items {
-			triggerItems = append(triggerItems, models.Item(m))
-		}
-	}
-
-	// Per-pipeline branch filter — only applies when the trigger came from a
-	// git push event. Manual triggers fan out to every attached pipeline so
-	// you can still kick a run from the UI without first hand-editing every
-	// Trigger node. The filter compares the pushed branch against the
-	// pipeline's Trigger node `fromBranch` — wildcard ("*", empty) on either
-	// side disables the filter for that pipeline.
+	// pushedBranch is set only for github_push triggers; it gates which
+	// pipelines run (a pipeline's Trigger.fromBranch must match, or be a
+	// wildcard). Manual triggers run every pipeline in every followed env.
 	pushedBranch := ""
 	isPush := false
+	source := ""
 	if items, ok := trigger.([]map[string]any); ok && len(items) > 0 {
-		if src, _ := items[0]["source"].(string); src == "github_push" {
-			isPush = true
-			if b, _ := items[0]["branch"].(string); b != "" {
-				pushedBranch = b
-			} else if b, _ := items[0]["ref"].(string); b != "" {
-				pushedBranch = b
+		if src, _ := items[0]["source"].(string); src != "" {
+			source = src
+			if src == "github_push" {
+				isPush = true
+				if b, _ := items[0]["branch"].(string); b != "" {
+					pushedBranch = b
+				} else if b, _ := items[0]["ref"].(string); b != "" {
+					pushedBranch = b
+				}
 			}
 		}
 	}
 
-	out := make([]string, 0, len(a.AttachedPipelines))
+	var out []string
 	var failures []DispatchFailure
-	for _, pid := range a.AttachedPipelines {
-		p, err := s.pipelines.Get(ctx, pid)
+
+	for _, envName := range a.Environments {
+		env, err := s.environments.GetByName(ctx, envName)
 		if err != nil {
-			slog.WarnContext(ctx, "agent_dispatch_pipeline_missing",
-				slog.String("agent_id", a.ID),
-				slog.String("pipeline_id", pid),
-				slog.Any("error", err),
-			)
+			slog.WarnContext(ctx, "agent_dispatch_env_missing",
+				slog.String("agent_id", a.ID), slog.String("env", envName), slog.Any("error", err))
 			failures = append(failures, DispatchFailure{
-				PipelineID: pid, Reason: "pipeline not found", Error: err.Error(),
+				Environment: envName, Reason: "environment not found", Error: err.Error(),
 			})
 			continue
 		}
-		wf, err := engine.ParseWorkflow(p.Definition)
-		if err != nil {
-			slog.WarnContext(ctx, "agent_dispatch_parse_failed",
-				slog.String("pipeline_id", pid),
-				slog.Any("error", err),
-			)
-			failures = append(failures, DispatchFailure{
-				PipelineID: pid, Reason: "parse failed", Error: err.Error(),
-			})
-			continue
-		}
-		if isPush {
-			triggerBranch := pipelineTriggerBranch(wf)
-			if triggerBranch != "" && triggerBranch != "*" && triggerBranch != pushedBranch {
-				slog.InfoContext(ctx, "agent_dispatch_branch_filtered",
-					slog.String("pipeline_id", pid),
-					slog.String("pushed", pushedBranch),
-					slog.String("trigger_branch", triggerBranch),
-				)
+		for _, pid := range env.PipelineIDs {
+			p, err := s.pipelines.Get(ctx, pid)
+			if err != nil {
 				failures = append(failures, DispatchFailure{
-					PipelineID: pid,
-					Reason:     "branch filtered",
-					Error:      fmt.Sprintf("trigger fromBranch=%q ≠ pushed=%q", triggerBranch, pushedBranch),
+					Environment: envName, PipelineID: pid, Reason: "pipeline not found", Error: err.Error(),
 				})
 				continue
 			}
-		}
-		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		execID, err := s.orch.RunAsync(runCtx, &orchestrator.RunRequest{
-			RequestMeta: orchestrator.RequestMeta{WorkflowID: pid},
-			Workflow:    wf,
-			TriggerData: triggerItems,
-		})
-		cancel()
-		if err != nil {
-			slog.WarnContext(ctx, "agent_dispatch_failed",
-				slog.String("pipeline_id", pid),
-				slog.Any("error", err),
-			)
-			failures = append(failures, DispatchFailure{
-				PipelineID: pid, Reason: "orchestrator submit", Error: err.Error(),
-			})
-			continue
-		}
-		// Hook the log archiver onto the new execution so per-node lines
-		// land in MinIO when each node finishes.
-		startLogArchiver(context.Background(), s.logs, s.events, execID)
-
-		// Broadcast so /runs etc. light up without polling. We extract
-		// `source` from the trigger payload (manual / github_push).
-		source := ""
-		if items, ok := trigger.([]map[string]any); ok && len(items) > 0 {
-			if s, _ := items[0]["source"].(string); s != "" {
-				source = s
+			wf, err := engine.ParseWorkflow(p.Definition)
+			if err != nil {
+				failures = append(failures, DispatchFailure{
+					Environment: envName, PipelineID: pid, Reason: "parse failed", Error: err.Error(),
+				})
+				continue
 			}
-		}
-		s.runsBus.Publish(RunCreatedEvent{
-			Type:         "run_created",
-			ExecutionID:  execID,
-			PipelineID:   pid,
-			PipelineName: p.Name,
-			AgentID:      a.ID,
-			Source:       source,
-			StartedAt:    time.Now().UTC(),
-		})
+			if isPush {
+				tb := pipelineTriggerBranch(wf)
+				if tb != "" && tb != "*" && tb != pushedBranch {
+					failures = append(failures, DispatchFailure{
+						Environment: envName, PipelineID: pid, Reason: "branch filtered",
+						Error: fmt.Sprintf("trigger fromBranch=%q ≠ pushed=%q", tb, pushedBranch),
+					})
+					continue
+				}
+			}
 
-		if s.runs != nil {
-			_ = s.runs.Insert(ctx, &storage.Run{
-				ID:           execID,
+			// Per-(env, pipeline) trigger payload: clone the base items and
+			// stamp the env name so downstream nodes (Deploy / Approval) can
+			// inherit env defaults.
+			perRunItems := stampTriggerEnv(trigger, envName)
+			triggerJSON, _ := json.Marshal(perRunItems)
+			triggerItems := make([]models.Item, 0, len(perRunItems))
+			for _, m := range perRunItems {
+				triggerItems = append(triggerItems, models.Item(m))
+			}
+
+			runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			execID, err := s.orch.RunAsync(runCtx, &orchestrator.RunRequest{
+				RequestMeta: orchestrator.RequestMeta{WorkflowID: pid},
+				Workflow:    wf,
+				TriggerData: triggerItems,
+			})
+			cancel()
+			if err != nil {
+				failures = append(failures, DispatchFailure{
+					Environment: envName, PipelineID: pid, Reason: "orchestrator submit", Error: err.Error(),
+				})
+				continue
+			}
+			startLogArchiver(context.Background(), s.logs, s.events, execID)
+			s.runsBus.Publish(RunCreatedEvent{
+				Type:         "run_created",
+				ExecutionID:  execID,
 				PipelineID:   pid,
 				PipelineName: p.Name,
-				Status:       "running",
+				AgentID:      a.ID,
+				Environment:  envName,
+				Source:       source,
 				StartedAt:    time.Now().UTC(),
-				TriggerData:  triggerJSON,
 			})
+			if s.runs != nil {
+				_ = s.runs.Insert(ctx, &storage.Run{
+					ID:           execID,
+					PipelineID:   pid,
+					PipelineName: p.Name,
+					Status:       "running",
+					StartedAt:    time.Now().UTC(),
+					TriggerData:  triggerJSON,
+				})
+			}
+			out = append(out, execID)
 		}
-		out = append(out, execID)
 	}
 	return out, failures, nil
 }
 
-// DispatchFailure describes why a single attached pipeline was skipped at
-// dispatch time. We surface these to the API caller so trigger failures
+// stampTriggerEnv returns a copy of the trigger items (each a map) with
+// `environment` set to envName. The base items are not mutated so the
+// same trigger payload can be reused across environments.
+func stampTriggerEnv(trigger any, envName string) []map[string]any {
+	items, ok := trigger.([]map[string]any)
+	if !ok || len(items) == 0 {
+		return []map[string]any{{"environment": envName}}
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, m := range items {
+		cp := make(map[string]any, len(m)+1)
+		for k, v := range m {
+			cp[k] = v
+		}
+		cp["environment"] = envName
+		out = append(out, cp)
+	}
+	return out
+}
+
+// DispatchFailure describes why a single (environment, pipeline) pair was
+// skipped at dispatch time. Surfaced to API callers so trigger failures
 // don't appear as silent no-ops.
 type DispatchFailure struct {
-	PipelineID string `json:"pipelineId"`
-	Reason     string `json:"reason"`
-	Error      string `json:"error,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	PipelineID  string `json:"pipelineId,omitempty"`
+	Reason      string `json:"reason"`
+	Error       string `json:"error,omitempty"`
 }
 
 // --- webhook receiver ----------------------------------------------------

@@ -219,6 +219,7 @@ func serve() int {
 			Runs:              mongo.Runs(),
 			Agents:            mongo.Agents(),
 			Credentials:       mongo.Credentials(),
+			Environments:      mongo.Environments(),
 			Events:            eventBus,
 			Logs:              logs,
 		}),

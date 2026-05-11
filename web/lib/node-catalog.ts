@@ -216,8 +216,8 @@ export const CATALOG: CatalogEntry[] = [
     color: "bg-rose-500",
     outputs: 1,
     defaults: {
-      target: "agentcore",
-      credentialName: "aws",
+      target: "",
+      credentialName: "",
       runtimeName: "",
       image: "",
       envVars: {},

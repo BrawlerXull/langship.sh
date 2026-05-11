@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	restate "github.com/restatedev/sdk-go"
@@ -16,6 +17,13 @@ import (
 // ApprovalExecutor implements a human-in-the-loop approval node.
 // It pauses the workflow using a Restate Awakeable and blocks until an external
 // caller resolves it via POST /api/executions/{id}/resume.
+//
+// Node params (all optional):
+//   - method "ui" (default) | "quorum" | "auto" — "auto" emits on output 0
+//     immediately without pausing. quorum N>1 is surfaced in the reviewer
+//     context; strict N-approver enforcement is a follow-up.
+//   - minApprovers — for method "quorum".
+//   - timeoutSeconds — reject automatically after that long.
 //
 // Two outputs:
 //   - Output 0: approved — items flow with human-supplied data merged in
@@ -37,6 +45,27 @@ func (e *ApprovalExecutor) Execute(
 	}
 	if len(inputItems) == 0 {
 		inputItems = []models.Item{{}}
+	}
+
+	// Resolve the effective approval policy from node params.
+	method := strParam(node.Parameters, "method", "")
+	if method == "" {
+		method = "ui"
+	}
+	minApprovers := intParam(node.Parameters, "minApprovers", 1)
+	timeoutSeconds := intParam(node.Parameters, "timeoutSeconds", 0)
+
+	// Auto method: don't pause at all — emit straight to the approved output.
+	if method == "auto" {
+		slog.InfoContext(ctx, "approval_auto", slog.String("node", node.Name))
+		var out []models.Item
+		for _, item := range inputItems {
+			m := copyItem(item)
+			m["approved"] = true
+			m["approval_method"] = "auto"
+			out = append(out, m)
+		}
+		return map[int][]models.Item{0: out}, nil
 	}
 
 	// Approval requires Restate for durable blocking.
@@ -68,6 +97,13 @@ func (e *ApprovalExecutor) Execute(
 	}
 	if reason, ok := resolved["reason"].(string); ok && reason != "" {
 		approvalCtx["reason"] = reason
+	}
+	approvalCtx["method"] = method
+	if method == "quorum" {
+		approvalCtx["minApprovers"] = minApprovers
+	}
+	if timeoutSeconds > 0 {
+		approvalCtx["timeoutSeconds"] = timeoutSeconds
 	}
 	if len(inputItems) == 1 {
 		approvalCtx["inputs"] = map[string]any(inputItems[0])
@@ -111,16 +147,48 @@ func (e *ApprovalExecutor) Execute(
 		slog.String("awakeable_id", awakeableID),
 	)
 
-	// Block on the Awakeable. Durable across crashes / restarts.
-	approvalData, err := awakeable.Result()
-	if err != nil {
-		return nil, fmt.Errorf("approval node %q: %w", node.Name, err)
+	// Block on the Awakeable. Durable across crashes / restarts. If a
+	// timeout is set, race it against a durable Restate timer — whichever
+	// fires first wins; on timeout we route to the rejected output.
+	var approvalData map[string]any
+	timedOut := false
+	if timeoutSeconds > 0 {
+		selector := restate.Select(rctx, awakeable, restate.After(rctx, time.Duration(timeoutSeconds)*time.Second))
+		switch winner := selector.Select(); winner {
+		case awakeable:
+			d, err := awakeable.Result()
+			if err != nil {
+				return nil, fmt.Errorf("approval node %q: %w", node.Name, err)
+			}
+			approvalData = d
+		default:
+			timedOut = true
+		}
+	} else {
+		d, err := awakeable.Result()
+		if err != nil {
+			return nil, fmt.Errorf("approval node %q: %w", node.Name, err)
+		}
+		approvalData = d
 	}
 
 	// Clear pending markers now that we've resumed.
 	restate.Clear(rctx, "pending_approval_node")
 	restate.Clear(rctx, "pending_approval_id")
 	restate.Clear(rctx, "pending_approval_context")
+
+	if timedOut {
+		slog.InfoContext(ctx, "approval_timed_out",
+			slog.String("node", node.Name), slog.Int("timeout_seconds", timeoutSeconds))
+		var rejected []models.Item
+		for _, item := range inputItems {
+			r := copyItem(item)
+			r["approved"] = false
+			r["rejection_reason"] = fmt.Sprintf("approval timed out after %ds", timeoutSeconds)
+			rejected = append(rejected, r)
+		}
+		return map[int][]models.Item{1: rejected}, nil
+	}
 
 	slog.InfoContext(ctx, "workflow_resumed",
 		slog.String("node", node.Name),

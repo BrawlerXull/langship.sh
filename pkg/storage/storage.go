@@ -132,9 +132,14 @@ type Agent struct {
 	WebhookInstalledAt *time.Time `json:"webhookInstalledAt,omitempty" bson:"webhook_installed_at,omitempty"`
 	AuthStatus         AuthStatus `json:"authStatus,omitempty"        bson:"auth_status,omitempty"`
 	AuthCheckedAt      *time.Time `json:"authCheckedAt,omitempty"     bson:"auth_checked_at,omitempty"`
-	AttachedPipelines  []string   `json:"attachedPipelines,omitempty" bson:"attached_pipelines,omitempty"`
+	// Environments this agent follows by name. Triggering the agent runs
+	// the pipelines of these environments (filtered by branch). Replaces
+	// the older flat AttachedPipelines list — pipelines now live on the
+	// environment, and agents subscribe to environments.
+	Environments []string `json:"environments,omitempty" bson:"environments,omitempty"`
 
 	// Named credentials — referenced by name from Deploy / future nodes.
+	// These are agent-specific overrides of the global credential pool.
 	Credentials []Credential `json:"credentials,omitempty" bson:"credentials,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"         bson:"created_at"`
@@ -176,4 +181,52 @@ type CredentialStore interface {
 	Update(ctx context.Context, c *Credential) error
 	Delete(ctx context.Context, name string) error
 	List(ctx context.Context) ([]*Credential, error)
+}
+
+// Environment is a global, named deploy stage (dev / staging / prod /
+// custom — the name is free-form). It is purely a sequencing container:
+// it owns an ordered list of pipeline IDs (the promotion sequence) plus
+// a description. Per-deploy config (credential, runtime target, approval
+// method) lives on the nodes themselves, not here.
+//
+// Agents subscribe to environments by name (agent.Environments);
+// triggering an agent runs the pipelines of the environments it follows
+// (each pipeline still gated by its Trigger node's branch filter).
+//
+// A pipeline may appear in more than one environment.
+type Environment struct {
+	ID          string `json:"id"                    bson:"_id"`
+	Name        string `json:"name"                  bson:"name"` // unique
+	Description string `json:"description,omitempty"  bson:"description,omitempty"`
+
+	// PipelineIDs is ordered — the order is the promotion sequence and is
+	// reorderable via the API. Dispatch still applies each pipeline's own
+	// branch filter; the order is the documented progression.
+	PipelineIDs []string `json:"pipelineIds,omitempty" bson:"pipeline_ids,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt" bson:"created_at"`
+	UpdatedAt time.Time `json:"updatedAt" bson:"updated_at"`
+}
+
+// HasPipeline reports whether the pipeline ID is brought into this env.
+func (e *Environment) HasPipeline(pipelineID string) bool {
+	if e == nil {
+		return false
+	}
+	for _, p := range e.PipelineIDs {
+		if p == pipelineID {
+			return true
+		}
+	}
+	return false
+}
+
+// EnvironmentStore persists global environments. Lookup is by name (the
+// user-facing identifier — pipelines/agents reference envs by name).
+type EnvironmentStore interface {
+	Create(ctx context.Context, e *Environment) error
+	GetByName(ctx context.Context, name string) (*Environment, error)
+	Update(ctx context.Context, e *Environment) error
+	Delete(ctx context.Context, name string) error
+	List(ctx context.Context) ([]*Environment, error)
 }
