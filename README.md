@@ -9,7 +9,7 @@ One pipeline definition → Kubernetes, AWS Bedrock AgentCore, or Vertex AI Agen
 Engine — same governance everywhere. Works with LangGraph, LangChain, LlamaIndex,
 CrewAI, AutoGen, or raw-SDK agents. No framework lock-in.
 
-[langship.sh](https://langship.sh) · [CLI](./langship-cli/) · [Positioning](./aude.md) · Apache 2.0
+[langship.sh](https://langship.sh) · [github.com/open-gitagent/langship.sh](https://github.com/open-gitagent/langship.sh) · [CLI](./langship-cli/) · [Positioning](./aude.md) · Apache 2.0
 
 </div>
 
@@ -305,7 +305,7 @@ CLI env: `LANGSHIP_API_URL`, `LANGSHIP_TOKEN` (override `~/.langship/config.toml
 
 ## Contributing & community
 
-- **Issues & discussion** — open a GitHub issue for bugs and feature requests. Search first.
+- **Issues & discussion** — [github.com/open-gitagent/langship.sh/issues](https://github.com/open-gitagent/langship.sh/issues) for bugs and feature requests. Search first.
 - **Contributing** — [CONTRIBUTING.md](./CONTRIBUTING.md): dev setup, what to run before a PR, conventions, how to add a node executor. Contributions accepted under Apache 2.0.
 - **Code of conduct** — [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) (Contributor Covenant). Report concerns to <khush@lyzr.ai>.
 - **Security** — **do not** file public issues for vulnerabilities. See [SECURITY.md](./SECURITY.md) — report privately to <khush@lyzr.ai>.
