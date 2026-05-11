@@ -56,15 +56,18 @@ func (e *ApprovalExecutor) Execute(
 	restate.Set(rctx, "pending_approval_node", node.Name)
 	restate.Set(rctx, "pending_approval_id", awakeableID)
 
-	// Approval context for the reviewer UI: resolved message + input data.
+	// Approval context for the reviewer UI: resolved message + reason +
+	// input data.
 	approvalCtx := map[string]any{}
+	resolved := node.Parameters
 	if execCtx != nil {
-		resolved := engine.ResolveExpressions(node.Parameters, execCtx, node.Name)
-		if msg, ok := resolved["message"].(string); ok && msg != "" {
-			approvalCtx["message"] = msg
-		}
-	} else if msg, ok := node.Parameters["message"].(string); ok && msg != "" {
+		resolved = engine.ResolveExpressions(node.Parameters, execCtx, node.Name)
+	}
+	if msg, ok := resolved["message"].(string); ok && msg != "" {
 		approvalCtx["message"] = msg
+	}
+	if reason, ok := resolved["reason"].(string); ok && reason != "" {
+		approvalCtx["reason"] = reason
 	}
 	if len(inputItems) == 1 {
 		approvalCtx["inputs"] = map[string]any(inputItems[0])

@@ -7,12 +7,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
 // ErrNotFound is returned when a queried document does not exist. API
 // handlers should map this to HTTP 404.
 var ErrNotFound = errors.New("not found")
+
+// ErrAlreadyExists is returned by Create when a uniqueness constraint
+// (e.g. credential name) would be violated. API handlers should map
+// this to HTTP 409.
+var ErrAlreadyExists = errors.New("already exists")
 
 // Pipeline is the persisted shape of a pipeline (formerly "flow") that the
 // API stores and returns to the UI. Definition is the n8n-format JSON.
@@ -69,6 +75,49 @@ const (
 	AuthFailed   AuthStatus = "failed"
 )
 
+// CredentialType discriminates the shape of a credential record. Only
+// fields belonging to the matching type should be populated; the rest
+// stay zero-valued.
+type CredentialType string
+
+const (
+	CredentialAWS CredentialType = "aws"
+	CredentialGCP CredentialType = "gcp"
+	CredentialKV  CredentialType = "kv"
+)
+
+// Credential is a named credential record attached to an agent. The
+// Deploy node (and any other node that needs cloud creds) looks one up
+// by Name. Secret fields are encrypted at rest with pkg/secrets; the API
+// layer never returns them — only `HasSecret` flags.
+//
+// Fields are deliberately flat instead of `union { aws, gcp, kv }` so
+// the Mongo schema stays simple and an upgrade to a new type only adds
+// fields without rewriting the doc shape.
+type Credential struct {
+	ID   string         `json:"id"   bson:"id"`
+	Name string         `json:"name" bson:"name"` // unique within an agent
+	Type CredentialType `json:"type" bson:"type"`
+
+	// AWS — non-secret. The Flow host's own identity AssumeRoles into
+	// AwsCrossAccountRoleArn at deploy time.
+	AwsRegion              string `json:"awsRegion,omitempty"              bson:"aws_region,omitempty"`
+	AwsAccountID           string `json:"awsAccountId,omitempty"           bson:"aws_account_id,omitempty"`
+	AwsCrossAccountRoleArn string `json:"awsCrossAccountRoleArn,omitempty" bson:"aws_cross_account_role_arn,omitempty"`
+
+	// GCP — projectId / location are non-secret. Service account JSON is.
+	GcpProjectID            string `json:"gcpProjectId,omitempty"   bson:"gcp_project_id,omitempty"`
+	GcpLocation             string `json:"gcpLocation,omitempty"    bson:"gcp_location,omitempty"`
+	GcpServiceAccountSealed string `json:"-"                        bson:"gcp_sa_sealed,omitempty"`
+
+	// Generic key-value store. Each value is sealed independently so we
+	// can return a list of keys publicly without leaking values.
+	KvSealed map[string]string `json:"-" bson:"kv_sealed,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt" bson:"created_at"`
+	UpdatedAt time.Time `json:"updatedAt" bson:"updated_at"`
+}
+
 // Agent is an agent repo registered with Langship. The PAT and webhook
 // secret are stored server-side; the API layer scrubs them before the
 // record leaves the boundary (see pkg/api/agents.go).
@@ -84,8 +133,26 @@ type Agent struct {
 	AuthStatus         AuthStatus `json:"authStatus,omitempty"        bson:"auth_status,omitempty"`
 	AuthCheckedAt      *time.Time `json:"authCheckedAt,omitempty"     bson:"auth_checked_at,omitempty"`
 	AttachedPipelines  []string   `json:"attachedPipelines,omitempty" bson:"attached_pipelines,omitempty"`
-	CreatedAt          time.Time  `json:"createdAt"         bson:"created_at"`
-	UpdatedAt          time.Time  `json:"updatedAt"         bson:"updated_at"`
+
+	// Named credentials — referenced by name from Deploy / future nodes.
+	Credentials []Credential `json:"credentials,omitempty" bson:"credentials,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"         bson:"created_at"`
+	UpdatedAt time.Time `json:"updatedAt"         bson:"updated_at"`
+}
+
+// LookupCredential returns the agent's credential matching name (case-
+// insensitive) and an ok flag. Convenience for executors.
+func (a *Agent) LookupCredential(name string) (Credential, bool) {
+	if a == nil {
+		return Credential{}, false
+	}
+	for _, c := range a.Credentials {
+		if strings.EqualFold(c.Name, name) {
+			return c, true
+		}
+	}
+	return Credential{}, false
 }
 
 // AgentStore persists agent registrations. Update mutates the entire
@@ -96,4 +163,17 @@ type AgentStore interface {
 	Update(ctx context.Context, a *Agent) error
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context) ([]*Agent, error)
+}
+
+// CredentialStore persists global (org-wide) credentials. Agents can
+// override these by name with a record on agent.Credentials, but the
+// global pool is the canonical place to define a credential once and
+// reuse it across many agents/pipelines. Lookup is by name (the user-
+// facing identifier — Deploy nodes reference creds by name, not ID).
+type CredentialStore interface {
+	Create(ctx context.Context, c *Credential) error
+	GetByName(ctx context.Context, name string) (*Credential, error)
+	Update(ctx context.Context, c *Credential) error
+	Delete(ctx context.Context, name string) error
+	List(ctx context.Context) ([]*Credential, error)
 }

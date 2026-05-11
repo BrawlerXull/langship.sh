@@ -19,6 +19,31 @@ import (
 	"github.com/lyzrai/flow/pkg/storage"
 )
 
+// PublicCredential is the scrubbed shape of a stored credential. We
+// return non-secret fields (region, accountId, role ARN, kv keys) and
+// boolean flags for any sealed values, never the sealed bytes themselves.
+type PublicCredential struct {
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Type      storage.CredentialType `json:"type"`
+	CreatedAt time.Time              `json:"createdAt"`
+	UpdatedAt time.Time              `json:"updatedAt"`
+
+	// AWS — all non-secret.
+	AwsRegion              string `json:"awsRegion,omitempty"`
+	AwsAccountID           string `json:"awsAccountId,omitempty"`
+	AwsCrossAccountRoleArn string `json:"awsCrossAccountRoleArn,omitempty"`
+
+	// GCP — projectId / location are non-secret. HasServiceAccount tells
+	// the UI whether the SA JSON has been uploaded.
+	GcpProjectID      string `json:"gcpProjectId,omitempty"`
+	GcpLocation       string `json:"gcpLocation,omitempty"`
+	HasServiceAccount bool   `json:"hasServiceAccount,omitempty"`
+
+	// Generic kv — keys are surfaced; values never are.
+	KvKeys []string `json:"kvKeys,omitempty"`
+}
+
 // Agent is the wire shape of an agent record. PAT and webhook secret are
 // scrubbed; HasPAT and webhook fields surface only the safe parts.
 type Agent struct {
@@ -34,11 +59,43 @@ type Agent struct {
 	AuthStatus         storage.AuthStatus `json:"authStatus,omitempty"`
 	AuthCheckedAt      *time.Time         `json:"authCheckedAt,omitempty"`
 	AttachedPipelines  []string           `json:"attachedPipelines,omitempty"`
-	CreatedAt          time.Time          `json:"createdAt"`
-	UpdatedAt          time.Time          `json:"updatedAt"`
+	Credentials        []PublicCredential `json:"credentials,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func publicCredential(c storage.Credential) PublicCredential {
+	out := PublicCredential{
+		ID:        c.ID,
+		Name:      c.Name,
+		Type:      c.Type,
+		CreatedAt: c.CreatedAt,
+		UpdatedAt: c.UpdatedAt,
+	}
+	switch c.Type {
+	case storage.CredentialAWS:
+		out.AwsRegion = c.AwsRegion
+		out.AwsAccountID = c.AwsAccountID
+		out.AwsCrossAccountRoleArn = c.AwsCrossAccountRoleArn
+	case storage.CredentialGCP:
+		out.GcpProjectID = c.GcpProjectID
+		out.GcpLocation = c.GcpLocation
+		out.HasServiceAccount = c.GcpServiceAccountSealed != ""
+	case storage.CredentialKV:
+		out.KvKeys = make([]string, 0, len(c.KvSealed))
+		for k := range c.KvSealed {
+			out.KvKeys = append(out.KvKeys, k)
+		}
+	}
+	return out
 }
 
 func (s *Server) publicAgent(a *storage.Agent) Agent {
+	creds := make([]PublicCredential, 0, len(a.Credentials))
+	for _, c := range a.Credentials {
+		creds = append(creds, publicCredential(c))
+	}
 	return Agent{
 		ID:                 a.ID,
 		Name:               a.Name,
@@ -52,6 +109,7 @@ func (s *Server) publicAgent(a *storage.Agent) Agent {
 		AuthStatus:         a.AuthStatus,
 		AuthCheckedAt:      a.AuthCheckedAt,
 		AttachedPipelines:  a.AttachedPipelines,
+		Credentials:        creds,
 		CreatedAt:          a.CreatedAt,
 		UpdatedAt:          a.UpdatedAt,
 	}
@@ -391,6 +449,25 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 		}
 	}
 
+	// Per-pipeline branch filter — only applies when the trigger came from a
+	// git push event. Manual triggers fan out to every attached pipeline so
+	// you can still kick a run from the UI without first hand-editing every
+	// Trigger node. The filter compares the pushed branch against the
+	// pipeline's Trigger node `fromBranch` — wildcard ("*", empty) on either
+	// side disables the filter for that pipeline.
+	pushedBranch := ""
+	isPush := false
+	if items, ok := trigger.([]map[string]any); ok && len(items) > 0 {
+		if src, _ := items[0]["source"].(string); src == "github_push" {
+			isPush = true
+			if b, _ := items[0]["branch"].(string); b != "" {
+				pushedBranch = b
+			} else if b, _ := items[0]["ref"].(string); b != "" {
+				pushedBranch = b
+			}
+		}
+	}
+
 	out := make([]string, 0, len(a.AttachedPipelines))
 	var failures []DispatchFailure
 	for _, pid := range a.AttachedPipelines {
@@ -416,6 +493,22 @@ func (s *Server) dispatchAgent(ctx context.Context, a *storage.Agent, trigger an
 				PipelineID: pid, Reason: "parse failed", Error: err.Error(),
 			})
 			continue
+		}
+		if isPush {
+			triggerBranch := pipelineTriggerBranch(wf)
+			if triggerBranch != "" && triggerBranch != "*" && triggerBranch != pushedBranch {
+				slog.InfoContext(ctx, "agent_dispatch_branch_filtered",
+					slog.String("pipeline_id", pid),
+					slog.String("pushed", pushedBranch),
+					slog.String("trigger_branch", triggerBranch),
+				)
+				failures = append(failures, DispatchFailure{
+					PipelineID: pid,
+					Reason:     "branch filtered",
+					Error:      fmt.Sprintf("trigger fromBranch=%q ≠ pushed=%q", triggerBranch, pushedBranch),
+				})
+				continue
+			}
 		}
 		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		execID, err := s.orch.RunAsync(runCtx, &orchestrator.RunRequest{
@@ -522,16 +615,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per the agent's configured ref: only dispatch if the branch matches.
-	if a.Ref != "" && a.Ref != "*" && github.BranchFromRef(push.Ref) != a.Ref {
-		slog.InfoContext(r.Context(), "github_webhook_ref_mismatch",
-			slog.String("agent_id", id),
-			slog.String("event_ref", push.Ref),
-			slog.String("agent_ref", a.Ref),
-		)
-		writeJSON(w, http.StatusOK, map[string]string{"message": "ref filtered"})
-		return
-	}
+	// Note: branch filtering happens per-pipeline in dispatchAgent — each
+	// Trigger node's `fromBranch` decides whether that pipeline runs for
+	// this push. The agent-level `Ref` is now only the default clone branch
+	// (used by Build when nothing upstream specifies one), not a webhook
+	// gate, so chains across branches (Promote main→dev fires the dev
+	// pipeline) work correctly.
 
 	if s.orch == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("orchestrator not configured"))
@@ -574,4 +663,25 @@ func deriveAgentName(raw string) string {
 		return r.String()
 	}
 	return strings.TrimSpace(raw)
+}
+
+// pipelineTriggerBranch returns the `fromBranch` parameter on the workflow's
+// Trigger node, or "" if the workflow has no Trigger node or no fromBranch
+// configured. Used to filter webhook dispatch so only pipelines matching the
+// pushed branch run. If multiple Trigger nodes exist (rare — schema allows it
+// but the orchestrator only feeds one), the first wins.
+func pipelineTriggerBranch(wf *models.WorkflowDefinition) string {
+	if wf == nil {
+		return ""
+	}
+	for _, n := range wf.Nodes {
+		if n.Type != "flow-nodes-base.trigger" {
+			continue
+		}
+		if v, ok := n.Parameters["fromBranch"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+		return ""
+	}
+	return ""
 }

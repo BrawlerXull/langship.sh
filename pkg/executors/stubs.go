@@ -107,19 +107,9 @@ func (e *PolicyExecutor) Execute(ctx context.Context, node models.NodeDef, input
 	return (&stubExecutor{stage: "policy", logName: "stub_policy", sleep: 200 * time.Millisecond}).Execute(ctx, node, inputs, ec)
 }
 
-// DeployExecutor stubs the Deploy stage.
-type DeployExecutor struct{}
+// DeployExecutor lives in deploy.go (real impl) — was previously a stub.
 
-func (e *DeployExecutor) Execute(ctx context.Context, node models.NodeDef, inputs [][]models.Item, ec *engine.ExecutionContext) (map[int][]models.Item, error) {
-	return (&stubExecutor{stage: "deploy", logName: "stub_deploy", sleep: 1 * time.Second}).Execute(ctx, node, inputs, ec)
-}
-
-// PromoteExecutor stubs the Promote stage.
-type PromoteExecutor struct{}
-
-func (e *PromoteExecutor) Execute(ctx context.Context, node models.NodeDef, inputs [][]models.Item, ec *engine.ExecutionContext) (map[int][]models.Item, error) {
-	return (&stubExecutor{stage: "promote", logName: "stub_promote", sleep: 500 * time.Millisecond}).Execute(ctx, node, inputs, ec)
-}
+// PromoteExecutor lives in promote.go (real impl) — was previously a stub.
 
 // RollbackExecutor stubs the Rollback stage.
 type RollbackExecutor struct{}

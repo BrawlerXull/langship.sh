@@ -65,6 +65,13 @@ func (m *Mongo) Runs() RunStore { return &mongoRuns{coll: m.db.Collection("runs"
 // Agents returns the AgentStore backed by this Mongo connection.
 func (m *Mongo) Agents() AgentStore { return &mongoAgents{coll: m.db.Collection("agents")} }
 
+// Credentials returns the global CredentialStore backed by this Mongo
+// connection. Per-agent overrides live on agent.Credentials and are not
+// persisted here; this collection is the org-wide pool.
+func (m *Mongo) Credentials() CredentialStore {
+	return &mongoCredentials{coll: m.db.Collection("credentials")}
+}
+
 func (m *Mongo) ensureIndexes(ctx context.Context) error {
 	if _, err := m.db.Collection("pipelines").Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
@@ -81,6 +88,12 @@ func (m *Mongo) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
 	}); err != nil {
 		return fmt.Errorf("agents indexes: %w", err)
+	}
+	if _, err := m.db.Collection("credentials").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "name", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "updated_at", Value: -1}}},
+	}); err != nil {
+		return fmt.Errorf("credentials indexes: %w", err)
 	}
 	return nil
 }
@@ -442,6 +455,68 @@ func (s *mongoAgents) List(ctx context.Context) ([]*Agent, error) {
 	}
 	defer cur.Close(ctx)
 	var out []*Agent
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// --- credentials (global pool) -------------------------------------------
+
+type mongoCredentials struct{ coll *mongo.Collection }
+
+func (s *mongoCredentials) Create(ctx context.Context, c *Credential) error {
+	if _, err := s.coll.InsertOne(ctx, c); err != nil {
+		// Surface the duplicate-name index violation as a typed error so
+		// the API layer can return 409 instead of a generic 500.
+		if mongo.IsDuplicateKeyError(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *mongoCredentials) GetByName(ctx context.Context, name string) (*Credential, error) {
+	var c Credential
+	if err := s.coll.FindOne(ctx, bson.M{"name": name}).Decode(&c); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *mongoCredentials) Update(ctx context.Context, c *Credential) error {
+	res, err := s.coll.ReplaceOne(ctx, bson.M{"name": c.Name}, c)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoCredentials) Delete(ctx context.Context, name string) error {
+	res, err := s.coll.DeleteOne(ctx, bson.M{"name": name})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *mongoCredentials) List(ctx context.Context) ([]*Credential, error) {
+	cur, err := s.coll.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []*Credential
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}

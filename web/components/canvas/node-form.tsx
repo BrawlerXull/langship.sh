@@ -102,6 +102,8 @@ function getBool(node: PipelineNode, key: string, fallback: boolean): boolean {
 function TriggerForm({ node, onChange }: NodeFormProps) {
   const mode = getString(node, "mode", "manual");
   const cron = getString(node, "cron", "0 * * * *");
+  const fromBranch = getString(node, "fromBranch", "main");
+  const toBranch = getString(node, "toBranch", "production");
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -132,6 +134,37 @@ function TriggerForm({ node, onChange }: NodeFormProps) {
           />
         </div>
       )}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="trig-from">From branch</Label>
+          <Input
+            id="trig-from"
+            value={fromBranch}
+            onChange={(e) =>
+              onChange(setParam(node, "fromBranch", e.target.value))
+            }
+            placeholder="main"
+            className="font-mono text-xs"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="trig-to">To branch</Label>
+          <Input
+            id="trig-to"
+            value={toBranch}
+            onChange={(e) =>
+              onChange(setParam(node, "toBranch", e.target.value))
+            }
+            placeholder="production"
+            className="font-mono text-xs"
+          />
+        </div>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        From/To branch travel in the trigger payload — Build clones{" "}
+        <code>fromBranch</code>, Promote opens a PR{" "}
+        <code>fromBranch → toBranch</code>.
+      </p>
     </div>
   );
 }
@@ -1094,48 +1127,159 @@ function TargetRow({
 }
 
 function DeployForm({ node, onChange }: NodeFormProps) {
-  const runtime = getString(node, "runtime", "kubernetes");
-  const env = getString(node, "env", "dev");
-  const target = getString(node, "target", "");
+  const target = getString(node, "target", "agentcore");
+  const credentialName = getString(node, "credentialName", "aws");
+  const runtimeName = getString(node, "runtimeName", "");
+  const image = getString(node, "image", "");
+  const timeout = getNumber(node, "timeoutSeconds", 600);
+
+  const rawEnv = (node.parameters?.envVars ?? {}) as Record<string, unknown>;
+  const envEntries: [string, string][] = Object.entries(rawEnv).map(
+    ([k, v]) => [k, typeof v === "string" ? v : String(v ?? "")]
+  );
+
+  function setEnvFromEntries(entries: [string, string][]) {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of entries) {
+      const key = k.trim();
+      if (key) obj[key] = v;
+    }
+    onChange(setParam(node, "envVars", obj));
+  }
+
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label>Runtime</Label>
-          <select
-            value={runtime}
-            onChange={(e) =>
-              onChange(setParam(node, "runtime", e.target.value))
-            }
-            className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
-          >
-            <option value="kubernetes">Kubernetes</option>
-            <option value="bedrock">AWS Bedrock AgentCore</option>
-            <option value="vertex">GCP Vertex Agent Engine</option>
-          </select>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="d-env">Environment</Label>
-          <Input
-            id="d-env"
-            value={env}
-            onChange={(e) => onChange(setParam(node, "env", e.target.value))}
-            placeholder="dev"
-          />
-        </div>
-      </div>
       <div className="space-y-1.5">
-        <Label htmlFor="d-target">Target</Label>
-        <Input
-          id="d-target"
+        <Label>Target</Label>
+        <select
           value={target}
           onChange={(e) => onChange(setParam(node, "target", e.target.value))}
-          placeholder="cluster name / project / agent ID"
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="agentcore">AWS Bedrock AgentCore</option>
+          <option value="kubernetes" disabled>
+            Kubernetes (coming soon)
+          </option>
+          <option value="vertex" disabled>
+            GCP Vertex Agent Engine (coming soon)
+          </option>
+        </select>
+        <p className="text-[11px] text-muted-foreground">
+          AgentCore deploys the upstream Push image. AWS region + account +
+          cross-account role come from the named credential below. The deploy
+          summary will include the public invoke URL.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="d-cred">Credential name</Label>
+        <Input
+          id="d-cred"
+          value={credentialName}
+          onChange={(e) =>
+            onChange(setParam(node, "credentialName", e.target.value))
+          }
+          placeholder="aws"
           className="font-mono text-xs"
         />
         <p className="text-[11px] text-muted-foreground">
-          Runtime-specific. E.g. for K8s: cluster + namespace; for Vertex: GCP
-          project + agent ID.
+          Must match a credential of type <code>aws</code> on the Agent
+          (Credentials section on the agent page).
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="d-runtime-name">Runtime name (override)</Label>
+        <Input
+          id="d-runtime-name"
+          value={runtimeName}
+          onChange={(e) =>
+            onChange(setParam(node, "runtimeName", e.target.value))
+          }
+          placeholder="(defaults to agent name; AgentCore enforces [a-zA-Z0-9_]{1,48})"
+          className="font-mono text-xs"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="d-image">Image (override)</Label>
+        <Input
+          id="d-image"
+          value={image}
+          onChange={(e) => onChange(setParam(node, "image", e.target.value))}
+          placeholder="(defaults to upstream Push __push.copies[0].imageRef)"
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Resolution order: this field → Push output → Build output.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label>Runtime env vars</Label>
+        {envEntries.length === 0 && (
+          <p className="text-[11px] text-muted-foreground">
+            No env vars set. AgentCore receives these at runtime (not baked
+            into the image).
+          </p>
+        )}
+        {envEntries.map(([k, v], i) => (
+          <div key={i} className="flex gap-2">
+            <Input
+              value={k}
+              onChange={(e) => {
+                const next = envEntries.slice();
+                next[i] = [e.target.value, v];
+                setEnvFromEntries(next);
+              }}
+              placeholder="KEY"
+              className="font-mono text-xs"
+            />
+            <Input
+              value={v}
+              onChange={(e) => {
+                const next = envEntries.slice();
+                next[i] = [k, e.target.value];
+                setEnvFromEntries(next);
+              }}
+              placeholder="value"
+              className="font-mono text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const next = envEntries.filter((_, idx) => idx !== i);
+                setEnvFromEntries(next);
+              }}
+              className="rounded-md border border-input px-2 text-xs hover:bg-muted"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => setEnvFromEntries([...envEntries, ["", ""]])}
+          className="rounded-md border border-input px-2 py-1 text-xs hover:bg-muted"
+        >
+          + Add env var
+        </button>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="d-timeout">Timeout (seconds)</Label>
+        <Input
+          id="d-timeout"
+          type="number"
+          value={timeout}
+          onChange={(e) =>
+            onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+          }
+          className="font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Caps the create + endpoint-readiness wait. AgentCore endpoints
+          typically reach READY in 60–180s.
         </p>
       </div>
     </div>
@@ -1143,31 +1287,124 @@ function DeployForm({ node, onChange }: NodeFormProps) {
 }
 
 function PromoteForm({ node, onChange }: NodeFormProps) {
-  const fromEnv = getString(node, "fromEnv", "staging");
-  const toEnv = getString(node, "toEnv", "prod");
+  const mode = getString(node, "mode", "open-pr");
+  const fromBranch = getString(node, "fromBranch", "");
+  const toBranch = getString(node, "toBranch", "");
+  const title = getString(node, "title", "");
+  const body = getString(node, "body", "Promotion opened by Flow.");
+  const mergeMethod = getString(node, "mergeMethod", "merge");
+  const timeout = getNumber(node, "timeoutSeconds", 60);
+
   return (
     <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label>Mode</Label>
+        <select
+          value={mode}
+          onChange={(e) => onChange(setParam(node, "mode", e.target.value))}
+          className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="open-pr">Open pull request</option>
+          <option value="merge">Merge branches directly</option>
+          <option value="merge-pr">Open + merge pull request</option>
+        </select>
+        <p className="text-[11px] text-muted-foreground">
+          Promote uses the agent&rsquo;s PAT to talk to GitHub.{" "}
+          <strong>open-pr</strong> opens a PR (idempotent — re-finds an existing
+          one); <strong>merge</strong> POSTs to <code>/merges</code>;{" "}
+          <strong>merge-pr</strong> opens then merges.
+        </p>
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="pr-from">From env</Label>
+          <Label htmlFor="pr-from">From branch (override)</Label>
           <Input
             id="pr-from"
-            value={fromEnv}
-            onChange={(e) => onChange(setParam(node, "fromEnv", e.target.value))}
+            value={fromBranch}
+            onChange={(e) =>
+              onChange(setParam(node, "fromBranch", e.target.value))
+            }
+            placeholder="(use Trigger fromBranch)"
+            className="font-mono text-xs"
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="pr-to">To env</Label>
+          <Label htmlFor="pr-to">To branch (override)</Label>
           <Input
             id="pr-to"
-            value={toEnv}
-            onChange={(e) => onChange(setParam(node, "toEnv", e.target.value))}
+            value={toBranch}
+            onChange={(e) =>
+              onChange(setParam(node, "toBranch", e.target.value))
+            }
+            placeholder="(use Trigger toBranch)"
+            className="font-mono text-xs"
           />
         </div>
       </div>
+
+      {(mode === "open-pr" || mode === "merge-pr") && (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="pr-title">PR title</Label>
+            <Input
+              id="pr-title"
+              value={title}
+              onChange={(e) =>
+                onChange(setParam(node, "title", e.target.value))
+              }
+              placeholder="Promote {{fromBranch}} → {{toBranch}}"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="pr-body">PR body</Label>
+            <textarea
+              id="pr-body"
+              value={body}
+              onChange={(e) =>
+                onChange(setParam(node, "body", e.target.value))
+              }
+              rows={3}
+              className="w-full rounded-md border border-input bg-transparent p-2 text-xs"
+            />
+          </div>
+        </>
+      )}
+
+      {mode === "merge-pr" && (
+        <div className="space-y-1.5">
+          <Label>Merge method</Label>
+          <select
+            value={mergeMethod}
+            onChange={(e) =>
+              onChange(setParam(node, "mergeMethod", e.target.value))
+            }
+            className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+          >
+            <option value="merge">Merge commit</option>
+            <option value="squash">Squash</option>
+            <option value="rebase">Rebase</option>
+          </select>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor="pr-to-secs">Timeout (seconds)</Label>
+        <Input
+          id="pr-to-secs"
+          type="number"
+          value={timeout}
+          onChange={(e) =>
+            onChange(setParam(node, "timeoutSeconds", Number(e.target.value)))
+          }
+          className="font-mono text-xs"
+        />
+      </div>
+
       <p className="text-[11px] text-muted-foreground">
-        Promote follows the project&rsquo;s branching strategy. Stub today;
-        will execute the real promotion (tag/branch/merge) when wired.
+        Branches default to the Trigger node&rsquo;s{" "}
+        <code>fromBranch</code> / <code>toBranch</code> when these fields are
+        empty.
       </p>
     </div>
   );

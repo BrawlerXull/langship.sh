@@ -25,6 +25,35 @@ export type ExecutionStatus = {
 
 export type AuthStatus = "untested" | "ok" | "failed";
 
+export type CredentialType = "aws" | "gcp" | "kv";
+
+export type PublicCredential = {
+  id: string;
+  name: string;
+  type: CredentialType;
+  createdAt: string;
+  updatedAt: string;
+  awsRegion?: string;
+  awsAccountId?: string;
+  awsCrossAccountRoleArn?: string;
+  gcpProjectId?: string;
+  gcpLocation?: string;
+  hasServiceAccount?: boolean;
+  kvKeys?: string[];
+};
+
+export type CredentialBody = {
+  name: string;
+  type: CredentialType;
+  awsRegion?: string;
+  awsAccountId?: string;
+  awsCrossAccountRoleArn?: string;
+  gcpProjectId?: string;
+  gcpLocation?: string;
+  gcpServiceAccountJson?: string;
+  kv?: Record<string, string>;
+};
+
 export type Agent = {
   id: string;
   name: string;
@@ -38,6 +67,7 @@ export type Agent = {
   authStatus?: AuthStatus;
   authCheckedAt?: string;
   attachedPipelines?: string[];
+  credentials?: PublicCredential[];
   createdAt: string;
   updatedAt: string;
 };
@@ -183,6 +213,57 @@ export const api = {
         failures?: { pipelineId: string; reason: string; error?: string }[];
       }>
     ),
+
+  listCredentials: (agentId: string) =>
+    fetch(`${base}/api/agents/${agentId}/credentials`).then(
+      handle<PublicCredential[]>
+    ),
+
+  listGlobalCredentials: () =>
+    fetch(`${base}/api/credentials`).then(handle<PublicCredential[]>),
+
+  getGlobalCredential: (name: string) =>
+    fetch(`${base}/api/credentials/${encodeURIComponent(name)}`).then(
+      handle<PublicCredential>
+    ),
+
+  createGlobalCredential: (body: CredentialBody) =>
+    fetch(`${base}/api/credentials`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<PublicCredential>),
+
+  updateGlobalCredential: (name: string, body: CredentialBody) =>
+    fetch(`${base}/api/credentials/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<PublicCredential>),
+
+  deleteGlobalCredential: (name: string) =>
+    fetch(`${base}/api/credentials/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then(handle<void>),
+
+  createCredential: (agentId: string, body: CredentialBody) =>
+    fetch(`${base}/api/agents/${agentId}/credentials`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<PublicCredential>),
+
+  updateCredential: (agentId: string, name: string, body: CredentialBody) =>
+    fetch(`${base}/api/agents/${agentId}/credentials/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<PublicCredential>),
+
+  deleteCredential: (agentId: string, name: string) =>
+    fetch(`${base}/api/agents/${agentId}/credentials/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then(handle<void>),
 
   // --- runs ---
   /** Returns the EventSource URL for SSE streaming of an execution.

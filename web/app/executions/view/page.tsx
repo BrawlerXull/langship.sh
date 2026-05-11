@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ChevronDown, ChevronRight, RefreshCw, Send } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Pause, RefreshCw, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -90,6 +90,7 @@ function ExecutionView() {
   const [awakeable, setAwakeable] = useState("");
   const [data, setData] = useState(`{"approved": true}`);
   const [resuming, setResuming] = useState(false);
+  const [approvalReason, setApprovalReason] = useState("");
 
   // Initial load
   useEffect(() => {
@@ -197,6 +198,26 @@ function ExecutionView() {
     return () => clearInterval(t);
   }, [id, streamConnected]);
 
+  // Poll the orchestrator REST endpoint independently of the SSE feed so
+  // we pick up `pending_approval` as soon as the Approval node parks the
+  // workflow. SSE only carries the engine's lifecycle events; pending-
+  // approval state is set by the executor as Restate KV and surfaced via
+  // GetPendingApproval. Don't poll once we've reached terminal state.
+  // 4s interval matches Restate's recommended minimum to avoid the
+  // shared-handler racing the workflow's own goroutine.
+  useEffect(() => {
+    if (!id) return;
+    const isTerm = (s: string | undefined) =>
+      ["success", "completed", "failed", "error", "partial_error"].includes(
+        (s || "").toLowerCase()
+      );
+    if (isTerm(status?.status)) return;
+    const t = setInterval(() => {
+      api.getExecution(id).then(setStatus).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [id, status?.status]);
+
   // Hydrate canvas node statuses from the terminal payload whenever we
   // have status + pipeline def. This handles the "joined after the run
   // finished" case — without it, the canvas stays at PENDING forever
@@ -233,9 +254,44 @@ function ExecutionView() {
     }
   }
 
+  // approveOrReject is the one-click path: reads the awakeable id from
+  // pending_approval (no manual copy) and resolves with the standard
+  // {approved: bool, reason} body the ApprovalExecutor unwraps.
+  async function approveOrReject(approved: boolean, reason?: string) {
+    const pending = (status as { pending_approval?: { awakeable_id?: string } } | null)
+      ?.pending_approval;
+    if (!pending?.awakeable_id) {
+      setError("no pending approval on this run");
+      return;
+    }
+    setResuming(true);
+    setError(null);
+    try {
+      await api.resumeExecution(id, {
+        awakeable_id: pending.awakeable_id,
+        data: { approved, reason },
+      });
+      const s = await api.getExecution(id).catch(() => null);
+      if (s) setStatus(s);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "resume failed");
+    } finally {
+      setResuming(false);
+    }
+  }
+
+  const pendingApproval = useMemo(() => {
+    const pa = (status as { pending_approval?: { node?: string; awakeable_id?: string; context?: Record<string, unknown> } } | null)
+      ?.pending_approval;
+    return pa && pa.awakeable_id ? pa : null;
+  }, [status]);
+
   const overallStatus = useMemo(
-    () => (status?.status as string) || run?.status || "running",
-    [status, run]
+    () =>
+      pendingApproval
+        ? "paused"
+        : (status?.status as string) || run?.status || "running",
+    [status, run, pendingApproval]
   );
   const isTerminal = ["success", "completed", "failed", "error", "partial_error"]
     .includes(overallStatus.toLowerCase());
@@ -348,45 +404,87 @@ function ExecutionView() {
         </CardContent>
       </Card>
 
-      {/* Resume overlay if paused */}
-      {(overallStatus === "paused" || overallStatus === "waiting") && (
-        <Card className="fixed bottom-6 right-6 z-30 w-80 shadow-xl">
-          <CardHeader>
-            <CardTitle>Resume</CardTitle>
+      {/* Pending approval overlay — surfaces the awakeable, exposes
+          one-click Approve / Reject so the user never has to copy IDs. */}
+      {pendingApproval && (
+        <Card className="fixed bottom-6 right-6 z-30 w-96 border-amber-500/50 shadow-xl">
+          <CardHeader className="space-y-1 border-b border-amber-500/20 bg-amber-500/5">
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                <Pause className="size-4" />
+                Approval needed
+              </CardTitle>
+              <Badge variant="warning">{pendingApproval.node}</Badge>
+            </div>
             <CardDescription>
-              Resolve a Restate awakeable to continue.
+              {pendingReason(pendingApproval) ??
+                "This run is waiting for a human decision."}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-3 pt-3">
             <div className="space-y-1.5">
-              <Label htmlFor="awakeable">Awakeable ID</Label>
-              <Input
-                id="awakeable"
-                value={awakeable}
-                onChange={(e) => setAwakeable(e.target.value)}
-                placeholder="awk_…"
-                className="font-mono text-xs"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="data">Resolution data (JSON)</Label>
+              <Label htmlFor="approval-reason">
+                Reason (optional, recorded in audit)
+              </Label>
               <Textarea
-                id="data"
-                rows={4}
-                value={data}
-                onChange={(e) => setData(e.target.value)}
-                spellCheck={false}
+                id="approval-reason"
+                rows={2}
+                value={approvalReason}
+                onChange={(e) => setApprovalReason(e.target.value)}
+                spellCheck
+                placeholder="LGTM — image scan clean, deploy to dev"
                 className="text-xs"
               />
             </div>
-            <Button
-              className="w-full"
-              onClick={onResume}
-              disabled={resuming || !awakeable}
-            >
-              <Send />
-              {resuming ? "Sending…" : "Resume"}
-            </Button>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                onClick={() => approveOrReject(true, approvalReason)}
+                disabled={resuming}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                <Check className="size-4" />
+                {resuming ? "Sending…" : "Approve"}
+              </Button>
+              <Button
+                onClick={() => approveOrReject(false, approvalReason)}
+                disabled={resuming}
+                variant="destructive"
+              >
+                <X className="size-4" />
+                Reject
+              </Button>
+            </div>
+            <details className="rounded-md border bg-muted/20 p-2">
+              <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-muted-foreground">
+                Manual resolve (raw awakeable)
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div className="font-mono text-[10px] break-all text-muted-foreground">
+                  {pendingApproval.awakeable_id}
+                </div>
+                <Textarea
+                  rows={3}
+                  value={data}
+                  onChange={(e) => setData(e.target.value)}
+                  spellCheck={false}
+                  className="text-[10px] font-mono"
+                  placeholder='{"approved": true, "reason": "…"}'
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full"
+                  disabled={resuming}
+                  onClick={() => {
+                    setAwakeable(pendingApproval.awakeable_id ?? "");
+                    onResume();
+                  }}
+                >
+                  <Send className="size-3.5" />
+                  Send raw
+                </Button>
+              </div>
+            </details>
           </CardContent>
         </Card>
       )}
@@ -1032,4 +1130,14 @@ function ScanResults({
       )}
     </div>
   );
+}
+
+// pendingReason returns a human-readable label for a pending approval. The
+// ApprovalExecutor stores its `reason` parameter under `context.reason` so
+// it round-trips through the workflow journal — pull it back out here.
+function pendingReason(pa: {
+  context?: Record<string, unknown>;
+}): string | undefined {
+  const r = pa.context?.reason;
+  return typeof r === "string" && r.trim() ? r : undefined;
 }

@@ -203,6 +203,228 @@ func (c *Client) UninstallWebhook(ctx context.Context, repo Repo, hookID int64) 
 		resp.StatusCode, truncate(string(body), 240))
 }
 
+// PullRequest is the slice of GitHub's PR shape we return upward.
+type PullRequest struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Merged  bool   `json:"merged"`
+	// Head/base sha + ref are useful for audit; pulled from nested fields.
+	HeadSHA  string `json:"-"`
+	HeadRef  string `json:"-"`
+	BaseSHA  string `json:"-"`
+	BaseRef  string `json:"-"`
+	MergeSHA string `json:"-"`
+}
+
+type prRaw struct {
+	Number   int    `json:"number"`
+	HTMLURL  string `json:"html_url"`
+	State    string `json:"state"`
+	Merged   bool   `json:"merged"`
+	MergedAt string `json:"merged_at"`
+	MergeSHA string `json:"merge_commit_sha"`
+	Head     struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"base"`
+}
+
+func (r prRaw) into() PullRequest {
+	return PullRequest{
+		Number: r.Number, HTMLURL: r.HTMLURL,
+		State: r.State, Merged: r.Merged,
+		HeadSHA: r.Head.SHA, HeadRef: r.Head.Ref,
+		BaseSHA: r.Base.SHA, BaseRef: r.Base.Ref,
+		MergeSHA: r.MergeSHA,
+	}
+}
+
+// OpenPullRequest opens a PR from `head` into `base`. Returns the existing
+// PR if one already exists for the same head/base pair (GitHub returns 422
+// in that case; we re-fetch via the list API). The PAT must have `repo`
+// (write) permissions.
+func (c *Client) OpenPullRequest(ctx context.Context, repo Repo, head, base, title, body string) (*PullRequest, error) {
+	payload := map[string]any{
+		"title": firstNonEmpty(title, fmt.Sprintf("Promote %s → %s", head, base)),
+		"body":  body,
+		"head":  head,
+		"base":  base,
+	}
+	buf, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		apiBase+"/repos/"+repo.String()+"/pulls", bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	c.applyAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		var pr prRaw
+		if err := json.Unmarshal(respBody, &pr); err != nil {
+			return nil, fmt.Errorf("decode PR response: %w", err)
+		}
+		out := pr.into()
+		return &out, nil
+	case http.StatusUnprocessableEntity:
+		// Most common cause: a PR already exists for this head/base. Fetch
+		// it so promote stays idempotent.
+		if existing, err := c.findPR(ctx, repo, head, base); err == nil && existing != nil {
+			return existing, nil
+		}
+		// Otherwise surface the original 422 (could be: no commits between
+		// branches, head doesn't exist, base doesn't exist, etc.).
+		return nil, fmt.Errorf("open PR: github 422: %s", truncate(string(respBody), 240))
+	default:
+		return nil, fmt.Errorf("open PR: github returned %d: %s",
+			resp.StatusCode, truncate(string(respBody), 240))
+	}
+}
+
+// findPR queries the open PRs for a head→base match. Used to recover an
+// already-open PR when OpenPullRequest's 422 means "duplicate".
+func (c *Client) findPR(ctx context.Context, repo Repo, head, base string) (*PullRequest, error) {
+	// GitHub expects head as `<owner>:<branch>` for cross-repo search; for
+	// same-repo PRs the bare branch is enough.
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("head", repo.Owner+":"+head)
+	q.Set("base", base)
+	url := apiBase + "/repos/" + repo.String() + "/pulls?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.applyAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list pulls: github %d: %s", resp.StatusCode, truncate(string(body), 240))
+	}
+	var arr []prRaw
+	if err := json.Unmarshal(body, &arr); err != nil {
+		return nil, err
+	}
+	if len(arr) == 0 {
+		return nil, nil
+	}
+	out := arr[0].into()
+	return &out, nil
+}
+
+// MergePullRequest merges PR #number using the API's PUT /pulls/{n}/merge.
+// `commitMessage` is optional. Method may be "merge" | "squash" | "rebase".
+// Returns the merge commit SHA on success.
+func (c *Client) MergePullRequest(ctx context.Context, repo Repo, number int, commitMessage, method string) (string, error) {
+	if method == "" {
+		method = "merge"
+	}
+	payload := map[string]any{"merge_method": method}
+	if commitMessage != "" {
+		payload["commit_message"] = commitMessage
+	}
+	buf, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("%s/repos/%s/pulls/%d/merge", apiBase, repo.String(), number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(buf))
+	if err != nil {
+		return "", err
+	}
+	c.applyAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("github request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("merge PR #%d: github %d: %s",
+			number, resp.StatusCode, truncate(string(body), 240))
+	}
+	var r struct {
+		SHA     string `json:"sha"`
+		Merged  bool   `json:"merged"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", err
+	}
+	if !r.Merged {
+		return "", fmt.Errorf("merge not applied: %s", r.Message)
+	}
+	return r.SHA, nil
+}
+
+// MergeBranches uses POST /repos/{owner}/{name}/merges to fast-forward
+// `base` to include `head`. No PR involved. Returns the merge commit SHA,
+// or "" with no error when the branches are already up to date (204).
+func (c *Client) MergeBranches(ctx context.Context, repo Repo, base, head, commitMessage string) (string, error) {
+	payload := map[string]any{
+		"base":           base,
+		"head":           head,
+		"commit_message": commitMessage,
+	}
+	buf, _ := json.Marshal(payload)
+	url := apiBase + "/repos/" + repo.String() + "/merges"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return "", err
+	}
+	c.applyAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("github request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		var r struct{ SHA string `json:"sha"` }
+		if err := json.Unmarshal(body, &r); err != nil {
+			return "", err
+		}
+		return r.SHA, nil
+	case http.StatusNoContent:
+		// 204 = already up to date. Caller treats this as a soft success.
+		return "", nil
+	case http.StatusConflict:
+		return "", fmt.Errorf("merge conflict between %s and %s — resolve manually or use mode=open-pr", base, head)
+	default:
+		return "", fmt.Errorf("merge branches: github %d: %s",
+			resp.StatusCode, truncate(string(body), 240))
+	}
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func (c *Client) applyAuth(req *http.Request) {
 	if c.pat != "" {
 		req.Header.Set("Authorization", "Bearer "+c.pat)

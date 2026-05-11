@@ -58,9 +58,10 @@ type ServerDeps struct {
 	// "https://abcd.trycloudflare.com"). Used to render webhook callback
 	// URLs that GitHub can hit. Empty means webhook install is disabled.
 	PublicURL string
-	Pipelines storage.PipelineStore
-	Runs      storage.RunStore
-	Agents    storage.AgentStore
+	Pipelines   storage.PipelineStore
+	Runs        storage.RunStore
+	Agents      storage.AgentStore
+	Credentials storage.CredentialStore
 	// Events is the in-memory pub/sub bus the orchestrator publishes
 	// per-node lifecycle events to. The SSE handler subscribes per
 	// execution ID. Nil disables /api/executions/{id}/stream.
@@ -87,11 +88,12 @@ type Server struct {
 	corsOrigins   []string
 	publicURL     string
 
-	pipelines storage.PipelineStore
-	runs      storage.RunStore
-	agents    storage.AgentStore
-	events    EventSubscriber
-	logs      logstore.Store
+	pipelines   storage.PipelineStore
+	runs        storage.RunStore
+	agents      storage.AgentStore
+	credentials storage.CredentialStore
+	events      EventSubscriber
+	logs        logstore.Store
 
 	// runsBus broadcasts run_created events to every UI tab subscribed to
 	// /api/runs/stream. Used so a webhook-triggered run shows up live in
@@ -109,10 +111,11 @@ func NewServer(deps ServerDeps) *Server {
 		restateIngres: deps.RestateIngressURL,
 		corsOrigins:   deps.CORSOrigins,
 		publicURL:     strings.TrimRight(deps.PublicURL, "/"),
-		pipelines:     deps.Pipelines,
-		runs:          deps.Runs,
-		agents:        deps.Agents,
-		events:        deps.Events,
+		pipelines:   deps.Pipelines,
+		runs:        deps.Runs,
+		agents:      deps.Agents,
+		credentials: deps.Credentials,
+		events:      deps.Events,
 		logs:          deps.Logs,
 		runsBus:       newRunsBus(),
 	}
@@ -166,6 +169,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/{id}/pipelines/{pipelineId}", s.handleAttachPipeline)
 	s.mux.HandleFunc("DELETE /api/agents/{id}/pipelines/{pipelineId}", s.handleDetachPipeline)
 	s.mux.HandleFunc("POST /api/agents/{id}/trigger", s.handleTriggerAgent)
+
+	// Credentials API — global org-wide pool. Lookup by name is shared
+	// across agents/pipelines. Secret fields are AES-GCM sealed at rest
+	// with FLOW_SECRET_KEY; the API never returns them.
+	s.mux.HandleFunc("GET /api/credentials", s.handleListGlobalCredentials)
+	s.mux.HandleFunc("POST /api/credentials", s.handleCreateGlobalCredential)
+	s.mux.HandleFunc("GET /api/credentials/{name}", s.handleGetGlobalCredential)
+	s.mux.HandleFunc("PUT /api/credentials/{name}", s.handleUpdateGlobalCredential)
+	s.mux.HandleFunc("DELETE /api/credentials/{name}", s.handleDeleteGlobalCredential)
+
+	// Per-agent overrides — same shape, but live on the agent doc so a
+	// pipeline can specialize a credential without touching the global
+	// pool.
+	s.mux.HandleFunc("GET /api/agents/{id}/credentials", s.handleListCredentials)
+	s.mux.HandleFunc("POST /api/agents/{id}/credentials", s.handleCreateCredential)
+	s.mux.HandleFunc("PUT /api/agents/{id}/credentials/{name}", s.handleUpdateCredential)
+	s.mux.HandleFunc("DELETE /api/agents/{id}/credentials/{name}", s.handleDeleteCredential)
 
 	// Public webhook receiver. GitHub posts here; HMAC signature is the
 	// authentication. Must NOT require CORS / API auth.

@@ -80,7 +80,14 @@ func (e *BuildExecutor) Execute(ctx context.Context, node models.NodeDef, inputs
 	// payload (or older trigger record) carried "refs/heads/main", trim it
 	// so the clone doesn't fail with "Remote branch refs/heads/main not
 	// found in upstream origin".
-	ref := stripRefsHeads(strFirst(strFromAny(trigger["ref"]), a.Ref, "main"))
+	// Prefer the Trigger node's explicit `fromBranch` over the older
+	// webhook `ref` field, then fall back to the agent's configured ref.
+	ref := stripRefsHeads(strFirst(
+		strFromAny(trigger["fromBranch"]),
+		strFromAny(trigger["ref"]),
+		a.Ref,
+		"main",
+	))
 
 	cloneDir, cleanup, err := cloneRepo(ctx, a, ref, commitSHA, time.Duration(timeoutSec)*time.Second)
 	if err != nil {

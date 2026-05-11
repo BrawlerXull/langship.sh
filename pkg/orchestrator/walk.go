@@ -104,10 +104,22 @@ func walkDurable(
 		}
 
 		started := time.Now()
-		outputs, runErr := runNode(ctx, "node:"+nm, func(c context.Context) (map[int][]models.Item, error) {
-			c = engine.WithNodeLogger(c, nodeLogger)
-			return ex(c, nd, in, execCtx)
-		})
+		// Approval is special: its executor calls Restate context methods
+		// (restate.Set / Clear / Awakeable) directly. Wrapping it in
+		// restate.Run would make those calls happen inside a Run block,
+		// which the SDK rejects with "Concurrent context use detected".
+		// So Approval runs against the parent workflow context, no Run.
+		var outputs map[int][]models.Item
+		var runErr error
+		if nd.Type == "flow-nodes-base.waitForApproval" {
+			runCtx := engine.WithNodeLogger(ctx, nodeLogger)
+			outputs, runErr = ex(runCtx, nd, in, execCtx)
+		} else {
+			outputs, runErr = runNode(ctx, "node:"+nm, func(c context.Context) (map[int][]models.Item, error) {
+				c = engine.WithNodeLogger(c, nodeLogger)
+				return ex(c, nd, in, execCtx)
+			})
+		}
 		dur := time.Since(started).Milliseconds()
 
 		if runErr != nil {

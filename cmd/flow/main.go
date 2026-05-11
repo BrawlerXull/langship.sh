@@ -160,10 +160,12 @@ func serve() int {
 		}
 	}
 
-	// Register executors now that storage is ready; the Build executor
-	// reads from AgentStore.
+	// Register executors now that storage is ready; Build reads from
+	// AgentStore for clone targets, Deploy looks up cloud credentials
+	// (agent-scoped first, global fallback).
 	executors.RegisterAll(executors.RegistryDeps{
-		Agents: mongo.Agents(),
+		Agents:      mongo.Agents(),
+		Credentials: mongo.Credentials(),
 	})
 	lookup = executors.BuildLookup()
 
@@ -216,6 +218,7 @@ func serve() int {
 			Pipelines:         mongo.Pipelines(),
 			Runs:              mongo.Runs(),
 			Agents:            mongo.Agents(),
+			Credentials:       mongo.Credentials(),
 			Events:            eventBus,
 			Logs:              logs,
 		}),

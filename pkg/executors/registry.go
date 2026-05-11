@@ -35,7 +35,8 @@ func Get(nodeType string) (NodeExecutor, error) {
 // RegistryDeps holds optional dependencies for executors that need external access.
 type RegistryDeps struct {
 	WorkflowLoader WorkflowLoaderFunc
-	Agents         storage.AgentStore // used by the Build executor to look up the source repo + PAT
+	Agents         storage.AgentStore      // used by Build (clone) and Deploy (lookup agent-scoped creds)
+	Credentials    storage.CredentialStore // global credential pool — Deploy falls back to this
 }
 
 // WorkflowLoaderFunc loads a workflow definition by ID from storage.
@@ -64,8 +65,8 @@ func RegisterAll(deps ...RegistryDeps) {
 	Register("flow-nodes-base.test", &TestExecutor{})
 	Register("flow-nodes-base.eval", &EvalExecutor{})
 	Register("flow-nodes-base.policy", &PolicyExecutor{})
-	Register("flow-nodes-base.deploy", &DeployExecutor{})
-	Register("flow-nodes-base.promote", &PromoteExecutor{})
+	Register("flow-nodes-base.deploy", &DeployExecutor{Agents: d.Agents, Credentials: d.Credentials})
+	Register("flow-nodes-base.promote", &PromoteExecutor{Agents: d.Agents})
 	Register("flow-nodes-base.rollback", &RollbackExecutor{})
 }
 

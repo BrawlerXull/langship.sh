@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Github,
   KeyRound,
+  Lock,
   Play,
   Plus,
   Trash2,
@@ -26,10 +27,15 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
+  CredentialForm,
+  CredentialRow,
+} from "@/components/credentials/credential-form";
+import {
   api,
   type Agent,
   type AuthStatus,
   type FlowSummary,
+  type PublicCredential,
   type Run,
   type ServerConfig,
 } from "@/lib/api";
@@ -512,6 +518,17 @@ function AgentDetail() {
         </Card>
       </div>
 
+      {/* Credentials ------------------------------------------------------ */}
+      <CredentialsSection
+        agentId={id}
+        credentials={agent.credentials ?? []}
+        onChanged={async () => {
+          // refetch agent so the credentials list updates
+          const a = await api.getAgent(id);
+          setAgent(a);
+        }}
+      />
+
       {/* Recent runs ------------------------------------------------------ */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -629,3 +646,133 @@ function RunStatus({ status }: { status: string }) {
 // Avoid unused-import lint when the symbol is referenced only by type.
 void KeyRound;
 void ExternalLink;
+
+
+// ─── Credentials ────────────────────────────────────────────────────────────
+
+type CredentialsSectionProps = {
+  agentId: string;
+  credentials: PublicCredential[];
+  onChanged: () => void | Promise<void>;
+};
+
+function CredentialsSection({ agentId, credentials, onChanged }: CredentialsSectionProps) {
+  const [adding, setAdding] = useState(false);
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [globals, setGlobals] = useState<PublicCredential[]>([]);
+
+  // Pull globals once so we can show inherited rows alongside the
+  // per-agent overrides. Refreshed when `onChanged` re-fetches the agent
+  // (cheap — credentials list is small).
+  useEffect(() => {
+    let cancelled = false;
+    api.listGlobalCredentials().then((g) => {
+      if (!cancelled) setGlobals(g);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [credentials]);
+
+  // Globals shadowed by an agent override: hide them from the inherited
+  // list; the override row is the source of truth.
+  const overrideNames = new Set(credentials.map((c) => c.name.toLowerCase()));
+  const inherited = globals.filter((g) => !overrideNames.has(g.name.toLowerCase()));
+
+  async function handleDelete(name: string) {
+    if (!confirm(`Delete agent override "${name}"? The pipeline will fall back to the global credential of the same name (if any).`)) return;
+    try {
+      await api.deleteCredential(agentId, name);
+      await onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "delete failed");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <Lock className="size-4" />
+            Credentials
+          </CardTitle>
+          <CardDescription>
+            Cloud creds available to nodes for this agent. Globals defined on
+            the <Link href="/credentials" className="underline">Credentials page</Link> are
+            inherited; add an override here to specialize a credential for
+            this agent only.
+          </CardDescription>
+        </div>
+        <Button size="sm" onClick={() => { setAdding(true); setEditingName(null); }}>
+          <Plus />
+          Add override
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {error && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+            {error}
+          </p>
+        )}
+
+        {!adding && credentials.length === 0 && inherited.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No credentials available. Add a global one on the{" "}
+            <Link href="/credentials" className="underline">Credentials page</Link>{" "}
+            or an agent-specific override here.
+          </p>
+        )}
+
+        {credentials.map((c) => (
+          <div key={c.id} className="rounded-md border bg-muted/20 p-3">
+            {editingName === c.name ? (
+              <CredentialForm
+                initial={c}
+                onCancel={() => setEditingName(null)}
+                onSubmit={async (body) => {
+                  await api.updateCredential(agentId, c.name, body);
+                  setEditingName(null);
+                  await onChanged();
+                }}
+                onError={setError}
+              />
+            ) : (
+              <CredentialRow
+                cred={c}
+                scopeLabel="agent override"
+                onEdit={() => setEditingName(c.name)}
+                onDelete={() => handleDelete(c.name)}
+              />
+            )}
+          </div>
+        ))}
+
+        {inherited.map((c) => (
+          <div key={`g-${c.id}`} className="rounded-md border border-dashed bg-muted/10 p-3 opacity-90">
+            <CredentialRow
+              cred={c}
+              scopeLabel="inherited (global)"
+              onEdit={() => { /* edit globals on the global page */ }}
+              onDelete={() => { /* deletes go through global page */ }}
+            />
+          </div>
+        ))}
+
+        {adding && (
+          <div className="rounded-md border bg-muted/20 p-3">
+            <CredentialForm
+              initial={null}
+              onCancel={() => setAdding(false)}
+              onSubmit={async (body) => {
+                await api.createCredential(agentId, body);
+                setAdding(false);
+                await onChanged();
+              }}
+              onError={setError}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

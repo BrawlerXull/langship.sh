@@ -10,6 +10,7 @@ import {
   Play,
   CheckSquare,
   Layers,
+  Lock,
   Radio,
   PanelLeft,
   PanelLeftClose,
@@ -38,17 +39,24 @@ type NavItem = {
 };
 
 const primary: NavItem[] = [
-  {
-    title: "Dashboard",
-    href: "/dashboard",
-    icon: LayoutDashboard,
-    match: (p) => p === "/dashboard",
-  },
+  // {
+  //   title: "Dashboard",
+  //   href: "/dashboard",
+  //   icon: LayoutDashboard,
+  //   match: (p) => p === "/dashboard",
+  // },
   {
     title: "Agents",
     href: "/agents",
     icon: Bot,
     match: (p) => p.startsWith("/agents"),
+  },
+
+  {
+    title: "Environments",
+    href: "/environments",
+    icon: Layers,
+    match: (p) => p.startsWith("/environments"),
   },
   {
     title: "Pipelines",
@@ -68,17 +76,18 @@ const primary: NavItem[] = [
     icon: CheckSquare,
     match: (p) => p.startsWith("/approvals"),
   },
-  {
-    title: "Environments",
-    href: "/environments",
-    icon: Layers,
-    match: (p) => p.startsWith("/environments"),
-  },
+ 
   {
     title: "Gateway",
     href: "/gateway",
     icon: Radio,
     match: (p) => p.startsWith("/gateway"),
+  },
+    {
+    title: "Credentials",
+    href: "/credentials",
+    icon: Lock,
+    match: (p) => p.startsWith("/credentials"),
   },
 ];
 
@@ -96,7 +105,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <LangshipMark />
                 </div>
                 <div className="flex flex-col gap-0.5 leading-none">
-                  <span className="font-semibold">Langship</span>
+                  <span className="font-semibold">Lyzrship.sh</span>
                 </div>
               </Link>
             </SidebarMenuButton>
