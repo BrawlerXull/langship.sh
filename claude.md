@@ -109,4 +109,4 @@ Light, frequent. Daily driver. CLI-first.
 
 Core APIs and data models must stay framework-agnostic. The key abstraction is a common interface across frameworks (runs, traces via OpenTelemetry/OpenLLMetry) so governance and operations policies apply uniformly regardless of the underlying agent framework. Avoid LangChain-only assumptions in core abstractions.
 
-Engine Restate) must stay wrapped behind Langship's own DSL — users never see the engine directly. Swapping later is possible but disruptive; pick deliberately.
+Engine Restate must stay wrapped behind Langship's own DSL — users never see the engine directly. Swapping later is possible but disruptive; pick deliberately.
