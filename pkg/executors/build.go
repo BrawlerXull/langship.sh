@@ -66,6 +66,11 @@ func (e *BuildExecutor) Execute(ctx context.Context, node models.NodeDef, inputs
 		return nil, fmt.Errorf("build: load agent %q: %w", agentID, err)
 	}
 
+	pat, err := a.GetPAT()
+	if err != nil {
+		return nil, fmt.Errorf("build: decrypt PAT: %w", err)
+	}
+
 	mode := strParam(node.Parameters, "mode", "docker")
 	timeoutSec := intParam(node.Parameters, "timeoutSeconds", 600)
 	if timeoutSec < 10 {
@@ -89,7 +94,7 @@ func (e *BuildExecutor) Execute(ctx context.Context, node models.NodeDef, inputs
 		"main",
 	))
 
-	cloneDir, cleanup, err := cloneRepo(ctx, a, ref, commitSHA, time.Duration(timeoutSec)*time.Second)
+	cloneDir, cleanup, err := cloneRepo(ctx, a.RepoURL, a.Name, pat, ref, commitSHA, time.Duration(timeoutSec)*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +120,7 @@ func (e *BuildExecutor) Execute(ctx context.Context, node models.NodeDef, inputs
 			"log_tail":  logTail,
 		}
 	case "docker", "":
-		summary, logTail, runErr = runDockerMode(hardCtx, node, a, cloneDir, ref, commitSHA)
+		summary, logTail, runErr = runDockerMode(hardCtx, node, a.Name, pat, cloneDir, ref, commitSHA)
 	default:
 		return nil, fmt.Errorf("build: unknown mode %q (want docker|shell)", mode)
 	}
@@ -175,7 +180,7 @@ func runShellMode(ctx context.Context, node models.NodeDef, a *storage.Agent, cl
 
 // --- docker (BuildKit) mode ---------------------------------------------
 
-func runDockerMode(ctx context.Context, node models.NodeDef, a *storage.Agent, cloneDir, ref, commitSHA string) (map[string]any, string, error) {
+func runDockerMode(ctx context.Context, node models.NodeDef, agentName, pat, cloneDir, ref, commitSHA string) (map[string]any, string, error) {
 	bkAddr := os.Getenv("BUILDKIT_HOST")
 	if bkAddr == "" {
 		// docker-compose publishes buildkitd on 127.0.0.1:1234, so a host
@@ -192,7 +197,7 @@ func runDockerMode(ctx context.Context, node models.NodeDef, a *storage.Agent, c
 	buildArgs := parseKVCSV(strParam(node.Parameters, "buildArgs", ""))
 
 	if imageName == "" {
-		imageName = a.Name // "owner/repo"
+		imageName = agentName // "owner/repo"
 	}
 	tag := commitSHA
 	if tag == "" {
@@ -202,7 +207,7 @@ func runDockerMode(ctx context.Context, node models.NodeDef, a *storage.Agent, c
 
 	contextDir := filepath.Join(cloneDir, filepath.Clean("/"+contextRel))
 
-	auth, insecure := authForRegistry(registry, a)
+	auth, insecure := authForRegistry(registry, pat)
 
 	slog.InfoContext(ctx, "build_run_docker",
 		slog.String("node", node.Name),
@@ -238,20 +243,16 @@ func runDockerMode(ctx context.Context, node models.NodeDef, a *storage.Agent, c
 }
 
 // authForRegistry decides what creds to send to BuildKit for `registry`.
-// ghcr.io: use the agent's PAT (must include write:packages).
+// ghcr.io: use the PAT (must include write:packages).
 // localhost:* and registry:* (compose-internal): anonymous + insecure.
 // Anything else: anonymous; user can wire a real auth path later.
-func authForRegistry(registry string, a *storage.Agent) (map[string]registryCreds, bool) {
+func authForRegistry(registry string, pat string) (map[string]registryCreds, bool) {
 	host := registryHostname(registry)
 	insecure := isInsecureRegistry(host)
 
-	if host == "ghcr.io" && a.PAT != "" {
-		owner := agentOwner(a)
-		if owner == "" {
-			owner = "x-access-token"
-		}
+	if host == "ghcr.io" && pat != "" {
 		return map[string]registryCreds{
-			"ghcr.io": {Username: owner, Password: a.PAT},
+			"ghcr.io": {Username: "x-access-token", Password: pat},
 		}, false
 	}
 	return map[string]registryCreds{}, insecure
@@ -315,16 +316,16 @@ func parseKVCSV(s string) map[string]string {
 
 // --- clone helper --------------------------------------------------------
 
-// cloneRepo shallow-clones a's repo into a fresh tmp dir, optionally
+// cloneRepo shallow-clones the repo into a fresh tmp dir, optionally
 // checking out a specific commit. Returns (cloneDir, cleanupFn, err).
-func cloneRepo(ctx context.Context, a *storage.Agent, ref, commit string, timeout time.Duration) (string, func(), error) {
+func cloneRepo(ctx context.Context, repoURL, agentName, pat, ref, commit string, timeout time.Duration) (string, func(), error) {
 	cloneDir, err := os.MkdirTemp("", "flow-build-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("build: tmp dir: %w", err)
 	}
 	cleanup := func() { os.RemoveAll(cloneDir) }
 
-	cloneURL, err := authedCloneURL(a.RepoURL, a.PAT)
+	cloneURL, err := authedCloneURL(repoURL, pat)
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("build: clone url: %w", err)
@@ -334,7 +335,7 @@ func cloneRepo(ctx context.Context, a *storage.Agent, ref, commit string, timeou
 	defer cancel()
 
 	slog.InfoContext(ctx, "build_clone",
-		slog.String("agent", a.Name),
+		slog.String("agent", agentName),
 		slog.String("ref", ref),
 		slog.String("dir", cloneDir),
 	)
