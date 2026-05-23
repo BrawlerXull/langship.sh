@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/lyzrai/flow/pkg/engine"
-	"github.com/lyzrai/flow/pkg/github"
 	"github.com/lyzrai/flow/pkg/models"
 	"github.com/lyzrai/flow/pkg/storage"
 )
@@ -244,6 +243,9 @@ func runDockerMode(ctx context.Context, node models.NodeDef, agentName, pat, clo
 
 // authForRegistry decides what creds to send to BuildKit for `registry`.
 // ghcr.io: use the PAT (must include write:packages).
+// The username is always "x-access-token" for GitHub token auth to ghcr.io.
+// (Prior code using agentOwner() is no longer needed; x-access-token is the
+// canonical dummy username GitHub accepts for PAT-based auth.)
 // localhost:* and registry:* (compose-internal): anonymous + insecure.
 // Anything else: anonymous; user can wire a real auth path later.
 func authForRegistry(registry string, pat string) (map[string]registryCreds, bool) {
@@ -279,18 +281,6 @@ func isInsecureRegistry(host string) bool {
 		return true
 	}
 	return false
-}
-
-// agentOwner extracts "owner" from an agent name shaped like "owner/repo".
-// Used as the GHCR username when pushing.
-func agentOwner(a *storage.Agent) string {
-	if i := strings.Index(a.Name, "/"); i > 0 {
-		return a.Name[:i]
-	}
-	if r, err := github.ParseRepo(a.RepoURL); err == nil {
-		return r.Owner
-	}
-	return ""
 }
 
 // parseKVCSV parses "k=v, k2=v2" into a map.

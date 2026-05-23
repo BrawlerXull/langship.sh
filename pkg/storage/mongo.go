@@ -428,6 +428,11 @@ func (s *mongoAgents) Create(ctx context.Context, a *Agent) error {
 }
 
 func (s *mongoAgents) Update(ctx context.Context, a *Agent) error {
+	// Zero out plaintext PAT field on every write to prevent stale plaintext
+	// from being re-persisted. This is migration-safe: GetPAT() will fall back
+	// to plaintext on first read after a new deployment, but subsequent writes
+	// seal it via SetPAT().
+	a.PAT = ""
 	res, err := s.coll.ReplaceOne(ctx, bson.M{"_id": a.ID}, a)
 	if err != nil {
 		return err
