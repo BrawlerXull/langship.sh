@@ -205,7 +205,13 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// dangling hooks pointing at a dead agent ID.
 	if a, err := s.agents.Get(r.Context(), id); err == nil && a.WebhookID != 0 {
 		if repo, perr := github.ParseRepo(a.RepoURL); perr == nil {
-			if pat, perr := a.GetPAT(); perr == nil && pat != "" {
+			pat, err := a.GetPAT()
+			if err != nil {
+				slog.WarnContext(r.Context(), "delete_agent_pat_decrypt_failed",
+					slog.String("agent_id", id),
+					slog.Any("error", err))
+			}
+			if pat != "" {
 				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 				_ = github.NewClient(pat).UninstallWebhook(ctx, repo, a.WebhookID)
 				cancel()
@@ -230,7 +236,10 @@ func (s *Server) handleTestAgentAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	pat, err := a.GetPAT()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("decrypt PAT: %w", err))
+		slog.ErrorContext(r.Context(), "test_auth_pat_decrypt_failed",
+			slog.String("agent_id", id),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, errors.New("failed to retrieve agent credentials"))
 		return
 	}
 	repo, err := github.ParseRepo(a.RepoURL)
@@ -280,7 +289,10 @@ func (s *Server) handleInstallWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	pat, err := a.GetPAT()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("decrypt PAT: %w", err))
+		slog.ErrorContext(r.Context(), "pat_decrypt_failed",
+			slog.String("agent_id", id),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, errors.New("failed to retrieve agent credentials"))
 		return
 	}
 	if pat == "" {
@@ -336,7 +348,10 @@ func (s *Server) handleUninstallWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 	pat, err := a.GetPAT()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("decrypt PAT: %w", err))
+		slog.ErrorContext(r.Context(), "pat_decrypt_failed",
+			slog.String("agent_id", id),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, errors.New("failed to retrieve agent credentials"))
 		return
 	}
 	repo, err := github.ParseRepo(a.RepoURL)

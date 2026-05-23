@@ -151,6 +151,7 @@ type Agent struct {
 
 // GetPAT returns the decrypted PAT. Falls back to plaintext PAT field for
 // backwards compatibility with agents created before encryption.
+// Returns the decrypted value from PATSealed if available, otherwise plaintext PAT.
 func (a *Agent) GetPAT() (string, error) {
 	if a.PATSealed != "" {
 		return secrets.OpenString(a.PATSealed)
@@ -158,7 +159,8 @@ func (a *Agent) GetPAT() (string, error) {
 	return a.PAT, nil
 }
 
-// SetPAT encrypts and stores the PAT.
+// SetPAT encrypts and stores the PAT. Clears plaintext PAT field after encryption.
+// This implements read-repair: plaintext PATs are encrypted on next write.
 func (a *Agent) SetPAT(pat string) error {
 	if pat == "" {
 		a.PATSealed = ""
@@ -170,7 +172,7 @@ func (a *Agent) SetPAT(pat string) error {
 		return err
 	}
 	a.PATSealed = sealed
-	a.PAT = ""
+	a.PAT = "" // Clear plaintext to enforce encryption
 	return nil
 }
 
