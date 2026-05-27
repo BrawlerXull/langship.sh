@@ -136,6 +136,11 @@ func serve() int {
 
 	// FLOW_SECRET_KEY is required for credential encryption. Check early so
 	// the failure is explicit rather than surfacing per-request.
+	// Note: This is a breaking change for deployments that predate this PR.
+	// If upgrading from a version without secrets.IsConfigured() checks, operators
+	// must set FLOW_SECRET_KEY before deploying. Existing deployments with unsealed
+	// agents will continue to work (GetPAT falls back to plaintext), but new agents
+	// and credential writes require the key to be set.
 	if !secrets.IsConfigured() {
 		slog.Error("FLOW_SECRET_KEY is not set, exiting",
 			slog.String("hint", "set FLOW_SECRET_KEY to any non-empty value for encryption of PAT tokens, AWS keys, GCP service accounts, and KV secrets"),
